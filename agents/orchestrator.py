@@ -10,7 +10,7 @@ from typing import Any, Callable
 from agents.registry import RegisteredAgent, Registry
 from agents.verify import DEFAULT_ERRORS_PATH, Runner, VerifyResult, log_error
 from safety.gate import DEFAULT_AUDIT_PATH, DEFAULT_STOP_PATH, Action, Approver, Gate
-from safety.ledger import BudgetPolicy, CostLedger
+from safety.ledger import BudgetPolicy, CostLedger, log_budget_denial
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,7 @@ class ExecutionResult:
     reason: str = ""
     cost: float | None = None  # ledger varsa: yazılan (committed) və ya qorunan (reserved) xərc
     cost_status: str = ""  # committed | reserved_unknown
+    transient: bool = False  # müvəqqəti xəta (retry üçün namizəd)
 
 
 class ExecutionError(RuntimeError):
@@ -39,6 +40,10 @@ class ExecutionError(RuntimeError):
     def __init__(self, message: str, cost: float | None = None) -> None:
         super().__init__(message)
         self.cost = cost
+
+
+class TransientError(ExecutionError):
+    """Müvəqqəti runner xətası. Retry yalnız real xərc (`cost`) məlum olduqda mümkündür."""
 
 
 @dataclass
@@ -92,6 +97,8 @@ class Orchestrator:
                 if res.status == "duplicate":
                     return ExecutionResult("duplicate", spec.name, reason=res.reason)
                 if res.status == "denied":
+                    log_budget_denial(self.audit_path, spec.name, task.permission, task.cost,
+                                      task.description, res.reason)
                     return ExecutionResult("blocked", spec.name, reason=res.reason)
                 reserved = True
 
@@ -124,7 +131,8 @@ class Orchestrator:
         try:
             output = self.runner(spec, dict(task.input))
         except Exception as exc:  # noqa: BLE001 — agent xətası jurnala düşməlidir
-            result = self._fail(spec.name, task, "run", f"{type(exc).__name__}: {exc}")
+            result = replace(self._fail(spec.name, task, "run", f"{type(exc).__name__}: {exc}"),
+                             transient=isinstance(exc, (TransientError, TimeoutError, ConnectionError)))
             return self._settle(result, op_id, task.cost, getattr(exc, "cost", None))
         actual = self._reported_cost(output, task.cost) if op_id else None
         missing = [k for k in spec.outputs if not isinstance(output, dict) or k not in output]

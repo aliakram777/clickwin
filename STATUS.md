@@ -3,7 +3,7 @@
 Yenilənib: 2026-11-17
 
 ## Cari mərhələ
-Mərhələ 5 — ümumi büdcə və xərc hesablaşması (tamamlandı, PR təsdiq gözləyir). Əvvəlki PR-lər: #1–#4.
+Mərhələ 6 — asılılıq qrafı və retry (tamamlandı, PR təsdiq gözləyir). Əvvəlki PR-lər: #1–#5.
 
 ## Hazırdır
 - Qurulum: README, CLAUDE.md, .gitignore, skill-lər (`test-gate`, `safety-layer`), CI
@@ -18,20 +18,24 @@ Mərhələ 5 — ümumi büdcə və xərc hesablaşması (tamamlandı, PR təsdi
 - `Orchestrator(ledger=...)`: limit yoxlaması kitabdakı davamlı xərclə gate-dən keçir; xərc yalnız gate icazə verəndən sonra yazılır; təkrar `op_id` -> `duplicate` (icra və xərc yoxdur). `CEO.run(goal, job_id=...)` addımlara `op_id` verir. Ledger verilməsə əvvəlki davranış saxlanır.
 - Mərhələ 5 — `safety/ledger.py`: rezerv modeli `reserved/committed/released` (+ `unknown` işarəsi), `BEGIN IMMEDIATE` ilə atomik `reserve()` (ümumi, agent və tapşırıq limiti; paralel bağlantılar limiti aşa bilmir), `commit/release/mark_unknown`, köhnə sxemin avtomatik miqrasiyası, `BudgetPolicy` (agent limiti spec limitindən yalnız aşağı ola bilər). `reconcile()` icazə verilmiş rezervi audit ilə yoxlayır, faktiki xərcin rezervi aşmasını bildirir.
 - `Orchestrator(policy=..., actual_cost=...)`: təkrar yoxlama -> atomik rezerv (limit aşılsa runner çağırılmır) -> gate -> icra -> hesablaşma. Gate rədd etsə rezerv azad olunur. Uğurda faktiki xərc (reporter yoxdursa rezerv) yazılır; xətada `ExecutionError(cost=...)` real xərci bildirirsə yazılır, bildirmirsə rezerv qorunub `unknown` işarələnir (`ledger.unknown_entries()`, sonradan `commit`). `CEO` plan ümumi/tapşırıq limitini aşırsa heç nə icra etmir.
-- Testlər: `tests/test_{spec,factory,verify,gate,registry,orchestrator,ceo,ledger,cost_integration,ledger_budget,budget_integration}.py` (180 test)
+- Mərhələ 6 — `agents/workflow.py`: `PlanStep` DAG-ı; boş plan, təkrar id, özünə/olmayan asılılıq və dövr `PlanError` ilə rədd olunur; icra sırası asılılıq-əvvəl, elan sırası sabit.
+- `CEO.run_workflow(goal, steps, job_id)`: addımlar sırayla icra olunur; uğursuz/bloklanmış/yoxlamadan keçməyən addımın asılıları `skipped`. Retry (`CEO(max_retries=0..2)`, default 2): yalnız `TransientError`/`TimeoutError`/`ConnectionError` və yalnız real xərc məlum olduqda (`TransientError(cost=...)`); hər cəhd unikal `op_id` (`job:addım:aN`), uğursuz cəhdin xərci yazılır, təkrar işə salma (`job_id`) `duplicate` olur. Xərc naməlumdursa avtomatik retry yoxdur, rezerv silinmir və `JobReport.needs_reconciliation` / `summary()` əl ilə uzlaşdırma tələb edir (`ledger.commit/release`).
+- Büdcə rədləri (`ledger` limiti, CEO plan ümumi/tapşırıq limiti) audit jurnalına `allowed:false, source:"budget"` kimi yazılır (`safety.ledger.log_budget_denial`); `reconcile()` onları saymır. `safety/gate.py` dəyişməyib.
+- Testlər: `tests/test_{spec,factory,verify,gate,registry,orchestrator,ceo,ledger,cost_integration,ledger_budget,budget_integration,workflow,retry}.py` (226 test)
 
 ## Məhdudiyyətlər
 - Real LLM çağırışı yoxdur (yalnız mock); real API açarı və xarici çağırış istifadə olunmayıb.
 - `runner` funksiyadır (mock); real agent icra mühiti və LLM hələ yoxdur.
-- CEO təhlili açar-söz qaydalarıdır (LLM yoxdur); addımlar bir-birindən asılı deyil, təkrar cəhd yoxdur.
+- CEO təhlili açar-söz qaydalarıdır (LLM yoxdur); `run()` düz siyahıdır, asılılıq və retry yalnız `run_workflow()`-dadır. Retry arasında gözləmə (backoff) yoxdur.
 - Ledger verilməyibsə xərc sayğacı yaddaşdadır (köhnə davranış); `BudgetPolicy` ledger tələb edir.
-- Limit aşımı (büdcə rezervi rədd edəndə) gate-ə çatmır: `audit.jsonl`-də yazılmır, nəticə `blocked` + səbəb kimi qayıdır.
-- Naməlum xərcli rezervlər əl ilə (`ledger.commit/release`) həll olunur; avtomatik vaxt aşımı yoxdur.
+- Büdcə rədləri gate-dən keçmir, ayrıca audit sətri kimi yazılır; CEO-nun yaddaşdakı iş büdcəsi (`budget=`) rədd etməsi isə audit-ə yazılmır.
+- Addımların girişi yalnız məqsəd mətnidir: asılılıq çıxışları növbəti addıma ötürülmür.
+- Naməlum xərcli rezervlər yalnız əl ilə (`ledger.commit/release`) həll olunur; avtomatik silinmir, vaxt aşımı yoxdur.
 - Faktiki xərc rezervdən çox ola bilər: həqiqət olaraq yazılır, `reconcile()` bunu bildirir (əvvəlcədən qarşısı alınmır).
 
 ## Növbəti addımlar (təsdiq gözləyir)
 - LLM əsaslı Planner (interfeys hazırdır, real API təsdiq tələb edir)
-- Addımlar arası asılılıq və uğursuz addımın təkrarı
+- Asılılıq çıxışlarının növbəti addıma ötürülməsi, retry gözləməsi (backoff)
 - Naməlum xərcli rezervlərin avtomatik həlli (vaxt aşımı / hesabat)
 - Real icra mühiti (sandbox) və LLM interfeysi
 

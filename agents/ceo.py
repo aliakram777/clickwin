@@ -6,12 +6,15 @@ CEO özü yan təsir yaratmır: hər icra Orchestrator -> safety/gate.py üzəri
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from agents.orchestrator import ExecutionResult, Orchestrator, Task
 from agents.verify import VerifyResult, log_error
+from agents.workflow import PlanError, PlanStep, execution_order
+from safety.ledger import log_budget_denial
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,10 @@ class StepReport:
     agent: str = ""
     output: Any = None
     reason: str = ""
+    step_id: str = ""
+    attempts: int = 1
+    op_id: str = ""  # son cəhdin op_id-si
+    needs_reconciliation: bool = False  # xərc naməlum: rezerv əl ilə uzlaşdırılmalıdır
 
 
 @dataclass(frozen=True)
@@ -63,6 +70,10 @@ class JobReport:
         return [s for s in self.steps if s.status != "ok"]
 
     @property
+    def needs_reconciliation(self) -> list[StepReport]:
+        return [s for s in self.steps if s.needs_reconciliation]
+
+    @property
     def outputs(self) -> dict[str, Any]:
         return {s.department: s.output for s in self.steps if s.status == "ok"}
 
@@ -74,7 +85,12 @@ class JobReport:
         lines += [
             f"- {s.department}/{s.agent or '?'}: {s.status} — {s.reason}" for s in self.failures
         ]
+        lines += [f"! əl ilə uzlaşdırma lazımdır: {s.op_id} (xərc naməlum, rezerv saxlanılır)"
+                  for s in self.needs_reconciliation]
         return "\n".join(lines)
+
+
+MAX_RETRIES = 2  # sərt yuxarı hədd
 
 
 class CEO:
@@ -84,7 +100,12 @@ class CEO:
         planner: Planner,
         budget: float,
         checks: Mapping[str, Callable[[Any], bool]] | None = None,
+        max_retries: int = 2,
     ) -> None:
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) \
+                or not 0 <= max_retries <= MAX_RETRIES:
+            raise ValueError(f"max_retries 0..{MAX_RETRIES} arasında tam ədəd olmalıdır")
+        self.max_retries = max_retries
         if isinstance(budget, bool) or not isinstance(budget, (int, float)) \
                 or not math.isfinite(budget) or budget < 0:
             raise ValueError("büdcə sonlu və mənfi olmayan rəqəm olmalıdır")
@@ -97,21 +118,9 @@ class CEO:
         steps = self.planner.plan(goal) if goal and goal.strip() else []
         if not steps:
             return JobReport(goal, "no_plan", reason="uyğun şöbə tapılmadı")
-        total = sum(s.cost for s in steps)
-        if total > self.budget + 1e-9:
-            return JobReport(goal, "rejected",
-                             reason=f"plan büdcəni aşır: {total:.4f} > {self.budget:.4f}")
-
-        pol = self.orchestrator.policy
-        if pol is not None and pol.task_limit is not None:
-            over = [s.department for s in steps if s.cost > pol.task_limit + 1e-9]
-            if over:
-                return JobReport(goal, "rejected",
-                                 reason=f"tapşırıq limiti aşılır ({pol.task_limit:.4f}): {over}")
-        room = self.orchestrator.global_room()
-        if room is not None and total > room + 1e-9:
-            return JobReport(goal, "rejected",
-                             reason=f"ümumi xərc limiti aşılır: plan {total:.4f} > qalan {room:.4f}")
+        rejected = self._preflight(goal, steps)
+        if rejected is not None:
+            return rejected
 
         reports: list[StepReport] = []
         for i, step in enumerate(steps):
@@ -126,15 +135,85 @@ class CEO:
         return JobReport(goal, status, tuple(reports))
 
     def _dispatch(self, goal: str, step: Rule, op_id: str = "") -> StepReport:
-        agents = self.orchestrator.registry.list(step.department)
-        # Şöbə agentlərinin elan etdiyi girişlər məqsəd mətni ilə doldurulur.
-        inputs = {k: goal for a in agents for k in a.spec.inputs}
-        task = Task(step.department, inputs, step.permission, step.cost,
-                    description=f"ceo:{step.department}:{goal[:60]}", op_id=op_id)
+        task = self._task(goal, step, op_id, f"ceo:{step.department}:{goal[:60]}")
         result = self.orchestrator.execute(task)  # gate burada işləyir
         if result.status != "ok":
             return StepReport(step.department, result.status, result.agent, reason=result.reason)
         return self._verify(step, result)
+
+    def _task(self, goal: str, step: Rule | PlanStep, op_id: str, description: str) -> Task:
+        agents = self.orchestrator.registry.list(step.department)
+        # Şöbə agentlərinin elan etdiyi girişlər məqsəd mətni ilə doldurulur.
+        inputs = {k: goal for a in agents for k in a.spec.inputs}
+        return Task(step.department, inputs, step.permission, step.cost,
+                    description=description, op_id=op_id)
+
+    def _preflight(self, goal: str, steps: Sequence[Rule | PlanStep]) -> JobReport | None:
+        """İcradan əvvəl büdcə yoxlaması; rədd varsa heç bir addım icra olunmur."""
+        total = sum(s.cost for s in steps)
+        if total > self.budget + 1e-9:
+            return JobReport(goal, "rejected",
+                             reason=f"plan büdcəni aşır: {total:.4f} > {self.budget:.4f}")
+        orch = self.orchestrator
+        reason = None
+        pol = orch.policy
+        if pol is not None and pol.task_limit is not None:
+            over = [s.department for s in steps if s.cost > pol.task_limit + 1e-9]
+            if over:
+                reason = f"tapşırıq limiti aşılır ({pol.task_limit:.4f}): {over}"
+        room = orch.global_room()
+        if reason is None and room is not None and total > room + 1e-9:
+            reason = f"ümumi xərc limiti aşılır: plan {total:.4f} > qalan {room:.4f}"
+        if reason is None:
+            return None
+        log_budget_denial(orch.audit_path, "ceo", "plan", total, f"ceo:{goal[:60]}", reason)
+        return JobReport(goal, "rejected", reason=reason)
+
+    def run_workflow(self, goal: str, steps: Sequence[PlanStep], job_id: str | None = None) -> JobReport:
+        """Asılılıq qrafı üzrə icra: asılılıq əvvəl; uğursuz addımın asılıları dayandırılır;
+        yalnız müvəqqəti və xərci məlum xətalar `max_retries`-ə qədər təkrar olunur."""
+        try:
+            ordered = execution_order(steps)
+        except PlanError as exc:
+            return JobReport(goal, "rejected", reason=str(exc))
+        rejected = self._preflight(goal, ordered)
+        if rejected is not None:
+            return rejected
+        job_id = job_id or uuid.uuid4().hex
+        reports: dict[str, StepReport] = {}
+        for step in ordered:
+            bad = next((d for d in step.depends_on if reports[d].status != "ok"), None)
+            if self._stopped():
+                reports[step.id] = StepReport(step.department, "skipped", step_id=step.id,
+                                              reason="stop bayrağı aktivdir")
+            elif bad is not None:
+                reports[step.id] = StepReport(step.department, "skipped", step_id=step.id,
+                                              reason=f"asılılıq uğursuz: {bad}")
+            else:
+                reports[step.id] = self._run_step(goal, step, job_id)
+        final = tuple(reports[s.id] for s in ordered)
+        good = sum(r.status == "ok" for r in final)
+        status = "ok" if good == len(final) else "partial" if good else "failed"
+        return JobReport(goal, status, final)
+
+    def _run_step(self, goal: str, step: PlanStep, job_id: str) -> StepReport:
+        for attempt in range(self.max_retries + 1):
+            op_id = f"{job_id}:{step.id}:a{attempt}"  # hər cəhd üçün unikal
+            task = self._task(goal, step, op_id, f"ceo:{step.id}#a{attempt}:{goal[:40]}")
+            result = self.orchestrator.execute(task)  # gate + büdcə burada işləyir
+            unknown = result.cost_status == "reserved_unknown"
+            if result.status == "ok":
+                return replace(self._verify(step, result), step_id=step.id, attempts=attempt + 1,
+                               op_id=op_id, needs_reconciliation=unknown)
+            # retry: yalnız müvəqqəti xəta VƏ xərc məlum (naməlum xərcdə avtomatik retry yoxdur)
+            if result.status == "error" and result.transient and not unknown \
+                    and result.cost_status == "committed":
+                continue
+            break
+        reason = result.reason + (" — naməlum xərc: əl ilə uzlaşdırma lazımdır" if unknown else "")
+        return StepReport(step.department, result.status, result.agent, reason=reason,
+                          step_id=step.id, attempts=attempt + 1, op_id=op_id,
+                          needs_reconciliation=unknown)
 
     def _verify(self, step: Rule, result: ExecutionResult) -> StepReport:
         check = self.checks.get(step.department)
