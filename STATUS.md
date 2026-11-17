@@ -3,7 +3,7 @@
 Yenilənib: 2026-11-17
 
 ## Cari mərhələ
-Mərhələ 6 — asılılıq qrafı və retry (tamamlandı, PR təsdiq gözləyir). Əvvəlki PR-lər: #1–#5.
+Mərhələ 7 — Effect Broker (tamamlandı, PR təsdiq gözləyir). Əvvəlki PR-lər: #1–#6.
 
 ## Hazırdır
 - Qurulum: README, CLAUDE.md, .gitignore, skill-lər (`test-gate`, `safety-layer`), CI
@@ -21,7 +21,9 @@ Mərhələ 6 — asılılıq qrafı və retry (tamamlandı, PR təsdiq gözləyi
 - Mərhələ 6 — `agents/workflow.py`: `PlanStep` DAG-ı; boş plan, təkrar id, özünə/olmayan asılılıq və dövr `PlanError` ilə rədd olunur; icra sırası asılılıq-əvvəl, elan sırası sabit.
 - `CEO.run_workflow(goal, steps, job_id)`: addımlar sırayla icra olunur; uğursuz/bloklanmış/yoxlamadan keçməyən addımın asılıları `skipped`. Retry (`CEO(max_retries=0..2)`, default 2): yalnız `TransientError`/`TimeoutError`/`ConnectionError` və yalnız real xərc məlum olduqda (`TransientError(cost=...)`); hər cəhd unikal `op_id` (`job:addım:aN`), uğursuz cəhdin xərci yazılır, təkrar işə salma (`job_id`) `duplicate` olur. Xərc naməlumdursa avtomatik retry yoxdur, rezerv silinmir və `JobReport.needs_reconciliation` / `summary()` əl ilə uzlaşdırma tələb edir (`ledger.commit/release`).
 - Büdcə rədləri (`ledger` limiti, CEO plan ümumi/tapşırıq limiti) audit jurnalına `allowed:false, source:"budget"` kimi yazılır (`safety.ledger.log_budget_denial`); `reconcile()` onları saymır. `safety/gate.py` dəyişməyib.
-- Testlər: `tests/test_{spec,factory,verify,gate,registry,orchestrator,ceo,ledger,cost_integration,ledger_budget,budget_integration,workflow,retry}.py` (226 test)
+- Mərhələ 7 — `safety/broker.py`: `EffectBroker.run(Effect, executor, validate)` yan təsirin yeganə yoludur. Sıra: stop bayrağı (audit-li) -> təkrar -> atomik büdcə rezervi -> Gate (icazə/təsdiq/audit) -> icra -> hesablaşma. Rədd olunan effektdə icraçı çağırılmır (icazə, təsdiq, limit, stop, yanlış xərc). Təkrar `op_id` ledger ilə (ledger yoxdursa yaddaşda) bir dəfə icra olunur. Xərc naməlumdursa (xəta, yanlış hesabat, `KeyboardInterrupt`) rezerv qorunur, `unknown` işarələnir və yalnız əl ilə (`ledger.commit/release`) həll olunur. Gate xətası rezervi azad edib yuxarı ötürülür.
+- `@broker_only` — alətləri bəzəyir: `EffectBroker.run` daxilindən kənarda çağırış `BrokerRequired` qaldırır (contextvar). `Orchestrator` runner-i yalnız broker-ə ötürülən lambda ilə çağırır; AST testi yeni birbaşa runner çağırışı əlavə olunsa düşür. Bir `EffectBroker` bir neçə orkestratorla paylaşıla bilər (`Orchestrator(broker=...)`). `ExecutionError/TransientError` indi `safety.broker`-dədir (`agents.orchestrator` yenidən ixrac edir). Gate və Ledger kodu dəyişməyib (ledger-ə yalnız `log_denial` əlavə olunub).
+- Testlər: `tests/test_{spec,factory,verify,gate,registry,orchestrator,ceo,ledger,cost_integration,ledger_budget,budget_integration,workflow,retry,broker}.py` (266 test)
 
 ## Məhdudiyyətlər
 - Real LLM çağırışı yoxdur (yalnız mock); real API açarı və xarici çağırış istifadə olunmayıb.
@@ -32,6 +34,9 @@ Mərhələ 6 — asılılıq qrafı və retry (tamamlandı, PR təsdiq gözləyi
 - Addımların girişi yalnız məqsəd mətnidir: asılılıq çıxışları növbəti addıma ötürülmür.
 - Naməlum xərcli rezervlər yalnız əl ilə (`ledger.commit/release`) həll olunur; avtomatik silinmir, vaxt aşımı yoxdur.
 - Faktiki xərc rezervdən çox ola bilər: həqiqət olaraq yazılır, `reconcile()` bunu bildirir (əvvəlcədən qarşısı alınmır).
+
+- **Məhdudiyyət (mərhələ 7):** `agents/verify.py` test tapşırığı üçün `runner`-i birbaşa çağırır (broker-siz). Yalnız mock/sandbox runner ilə istifadə olunmalıdır; real alətlər `@broker_only` olduğundan orada işləməz. Statik test bu istisnanı sabitləyir.
+- Təkrar `op_id` cəhdləri yeni audit sətri yaratmır (köhnə testlə uyğunluq); rədd qərarları (stop, büdcə, Gate) audit-ə yazılır.
 
 ## Növbəti addımlar (təsdiq gözləyir)
 - LLM əsaslı Planner (interfeys hazırdır, real API təsdiq tələb edir)
