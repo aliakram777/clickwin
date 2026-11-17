@@ -204,6 +204,13 @@ class CEO:
         status = "ok" if good == len(final) else "partial" if good else "failed"
         return JobReport(goal, status, final)
 
+    def run_proposal(self, goal: str, proposal: Any, job_id: str | None = None) -> JobReport:
+        """LLM/xarici təklifi icra edir: təklif etibarsız/mövcud deyilsə heç nə icra olunmur; etibarlıdırsa
+        yalnız mövcud deterministik yolla (`run_workflow`: büdcə, Orchestrator, Broker, Gate, təsdiq)."""
+        if not getattr(proposal, "ok", False):
+            return JobReport(goal, "no_plan", reason=str(getattr(proposal, "reason", "") or "təklif rədd edildi"))
+        return self.run_workflow(goal, proposal.steps, job_id)
+
     def _run_step(self, goal: str, step: PlanStep, job_id: str) -> StepReport:
         for attempt in range(self.max_retries + 1):
             op_id = f"{job_id}:{step.id}:a{attempt}"  # hər cəhd üçün unikal
