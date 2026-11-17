@@ -1,0 +1,22 @@
+# Sirlər — heç vaxt commit edilmir
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Lokal verilənlər bazası
+*.db
+*.sqlite
+*.sqlite3
+
+# Redaktor / OS
+.idea/
+.vscode/
+.DS_Store
