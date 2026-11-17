@@ -1,7 +1,7 @@
 """Effect Broker: bütün yan təsirlərin yeganə yolu.
 
-Hər effekt üçün sıra: stop bayrağı -> təkrar yoxlaması -> büdcə rezervi (atomik) -> Gate (icazə, təsdiq,
-audit) -> icra -> hesablaşma. İcraçı (`executor`) yalnız bu sırada və yalnız broker daxilində çağırılır;
+Hər effekt üçün sıra: stop bayrağı -> təkrar yoxlaması -> (həssas effekt) təsdiq: pending/yoxlama ->
+büdcə rezervi (atomik) -> Gate (icazə, təsdiq istifadəsi, audit) -> icra -> hesablaşma. İcraçı (`executor`) yalnız bu sırada və yalnız broker daxilində çağırılır;
 rədd olunan effektdə heç vaxt çağırılmır. Gate və Ledger dəyişdirilmir, olduğu kimi istifadə olunur.
 """
 from __future__ import annotations
@@ -14,7 +14,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
-from agents.spec import AgentSpec
+from agents.spec import SENSITIVE_PERMISSIONS, AgentSpec
+from safety.approvals import ApprovalClient, effect_digest
 from safety.gate import DEFAULT_AUDIT_PATH, DEFAULT_STOP_PATH, Action, Approver, Gate
 from safety.ledger import BudgetPolicy, CostLedger, log_denial
 
@@ -60,11 +61,13 @@ class Effect:
     cost: float = 0.0
     op_id: str = ""  # verilibsə eyni op_id yalnız bir dəfə icra və hesablanır
     description: str = ""
+    payload: Any = None  # təsdiq hash-inə daxildir (JSON-a çevrilə bilməlidir)
+    approval_id: str = ""  # təsdiq verildikdən sonra eyni effekti göndərərkən (istəyə bağlı)
 
 
 @dataclass(frozen=True)
 class EffectResult:
-    status: str  # ok | blocked | duplicate | error
+    status: str  # ok | blocked | duplicate | error | pending_approval
     reason: str = ""
     output: Any = None
     cost: float | None = None  # committed (faktiki) və ya reserved_unknown (qorunan rezerv)
@@ -72,6 +75,7 @@ class EffectResult:
     transient: bool = False
     stage: str = ""  # error üçün: run | output
     op_id: str = ""
+    approval_id: str = ""  # pending_approval üçün: sahibin təsdiqləyəcəyi sorğunun ID-si
 
 
 class EffectBroker:
@@ -83,15 +87,19 @@ class EffectBroker:
         ledger: CostLedger | None = None,
         policy: BudgetPolicy | None = None,
         actual_cost: Callable[[Any], Any] | None = None,
+        approvals: ApprovalClient | None = None,
     ) -> None:
         if policy is not None and ledger is None:
             raise ValueError("büdcə siyasəti xərc kitabı (ledger) tələb edir")
+        if approvals is not None and approver is not None:
+            raise ValueError("approver və approvals birlikdə verilə bilməz (təsdiq mənbəyi tək olmalıdır)")
         self.audit_path = Path(audit_path)
         self.stop_path = Path(stop_path)
         self.approver = approver
         self.ledger = ledger
         self.policy = policy
         self.actual_cost = actual_cost
+        self.approvals = approvals  # yalnız sorğu/yoxlama/istifadə; təsdiq etmək imkanı yoxdur
         self._spent: dict[str, float] = {}  # ledger yoxdursa yaddaşdakı sayğac
         self._seen: set[str] = set()  # ledger yoxdursa icra olunmuş açıq op_id-lər
 
@@ -122,8 +130,16 @@ class EffectBroker:
         elif effect.op_id and op_id in self._seen:
             return EffectResult("duplicate", f"təkrar əməliyyat: {op_id}", op_id=op_id)
 
+        approver = self.approver
+        if self.approvals is not None and effect.permission in SENSITIVE_PERMISSIONS \
+                and effect.permission in spec.permissions and _valid_cost(effect.cost):
+            gated = self._approval_stage(effect, op_id)  # həssas effekt: təsdiq olmadan irəli getmir
+            if isinstance(gated, EffectResult):
+                return gated
+            approver = gated
+
         # Gate hər dəfə effektin cari spec-i ilə qurulur: yenilənmiş icazələr dərhal qüvvəyə minir.
-        gate = Gate(spec, self.audit_path, self.stop_path, self.approver)
+        gate = Gate(spec, self.audit_path, self.stop_path, approver)
         reserved = False
         if self.ledger is None:
             gate.spent = self._spent.get(spec.name, 0.0)
@@ -160,6 +176,39 @@ class EffectBroker:
                 self._seen.add(op_id)
 
         return self._execute(effect, op_id, reserved, executor, validate)  # 5. icra + 6. hesablaşma
+
+    def _approval_stage(self, effect: Effect, op_id: str) -> EffectResult | Approver:
+        """Təsdiq yoxdursa pending/blocked nəticə qaytarır. Təsdiq etibarlıdırsa Gate üçün approver qaytarır:
+        o, təsdiqi Gate-in son qərarı anında (icazə və limit yoxlamalarından sonra) bir dəfə istifadə edir."""
+        spec = effect.spec
+
+        def blocked(reason: str) -> EffectResult:
+            log_denial(self.audit_path, spec.name, effect.permission, effect.cost,
+                       effect.description, reason, "approval")
+            return EffectResult("blocked", reason, op_id=op_id)
+
+        if not effect.op_id:
+            return blocked("təsdiq tələb edən effektdə op_id məcburidir")
+        try:
+            digest = effect_digest(spec.name, effect.permission, effect.cost, effect.op_id,
+                                   effect.description, effect.payload)
+        except ValueError as exc:
+            return blocked(str(exc))
+        if effect.approval_id:
+            checked = self.approvals.check(effect.approval_id, digest.hash)
+            if not checked.ok:
+                return blocked(checked.reason)
+            approval_id = effect.approval_id
+        else:
+            ticket = self.approvals.request(spec.name, effect.permission, effect.cost, effect.op_id,
+                                            effect.description, effect.payload)
+            if ticket.status == "pending":
+                return EffectResult("pending_approval", "sahibin təsdiqi gözlənilir",
+                                    op_id=op_id, approval_id=ticket.id)
+            if ticket.status != "approved":
+                return blocked(f"təsdiq {ticket.status}")
+            approval_id = ticket.id
+        return lambda action: self.approvals.consume(approval_id, digest.hash).ok
 
     def _execute(self, effect: Effect, op_id: str, reserved: bool, executor: Callable[[], Any],
                  validate: Callable[[Any], str | None] | None) -> EffectResult:

@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from agents.registry import RegisteredAgent, Registry
 from agents.verify import DEFAULT_ERRORS_PATH, Runner, VerifyResult, log_error
+from safety.approvals import ApprovalClient
 from safety.broker import Effect, EffectBroker, EffectResult, ExecutionError, TransientError
 from safety.gate import DEFAULT_AUDIT_PATH, DEFAULT_STOP_PATH, Approver
 from safety.ledger import BudgetPolicy, CostLedger
@@ -22,17 +23,19 @@ class Task:
     cost: float = 0.0
     description: str = ""
     op_id: str = ""  # verilibsə: eyni op_id yalnız bir dəfə icra və hesablanır
+    approval_id: str = ""  # sahib təsdiqlədikdən sonra eyni tapşırığı göndərərkən (istəyə bağlı)
 
 
 @dataclass(frozen=True)
 class ExecutionResult:
-    status: str  # ok | blocked | unrouted | error | duplicate
+    status: str  # ok | blocked | unrouted | error | duplicate | pending_approval
     agent: str = ""
     output: Any = None
     reason: str = ""
     cost: float | None = None  # ledger varsa: yazılan (committed) və ya qorunan (reserved) xərc
     cost_status: str = ""  # committed | reserved_unknown
     transient: bool = False  # müvəqqəti xəta (retry üçün namizəd)
+    approval_id: str = ""  # pending_approval: sahibin qərar verəcəyi sorğu
 
 
 @dataclass
@@ -46,16 +49,18 @@ class Orchestrator:
     ledger: CostLedger | None = None  # verilibsə xərc davamlıdır və təkrar qorunur
     policy: BudgetPolicy | None = None  # ümumi/tapşırıq/agent limitləri (ledger tələb edir)
     actual_cost: Callable[[Any], Any] | None = None  # çıxışdan faktiki xərc; None -> rezerv
+    approvals: ApprovalClient | None = None  # həssas effektlər üçün təsdiq (approver ilə birlikdə yox)
     broker: EffectBroker | None = None  # verilməsə yuxarıdakı parametrlərlə qurulur
 
     def __post_init__(self) -> None:
         if self.broker is None:
             self.broker = EffectBroker(self.audit_path, self.stop_path, self.approver, self.ledger,
-                                       self.policy, self.actual_cost)
+                                       self.policy, self.actual_cost, self.approvals)
         # Orkestrator və CEO broker-in cari parametrlərini görür (paylaşılan broker halında da).
         b = self.broker
         self.audit_path, self.stop_path, self.approver = b.audit_path, b.stop_path, b.approver
         self.ledger, self.policy, self.actual_cost = b.ledger, b.policy, b.actual_cost
+        self.approvals = b.approvals
 
     def global_room(self) -> float | None:
         """Ümumi limitdən qalan yer (limit/kitab yoxdursa None)."""
@@ -68,7 +73,8 @@ class Orchestrator:
         if agent is None:
             return ExecutionResult("unrouted", reason=f"uyğun agent yoxdur: {task.department}")
         spec = agent.spec
-        effect = Effect(spec, task.permission, task.cost, task.op_id, task.description)
+        effect = Effect(spec, task.permission, task.cost, task.op_id, task.description,
+                        payload=task.input, approval_id=task.approval_id)
         # Runner yalnız bu lambda ilə, broker-in icra mərhələsində çağırılır.
         res = self.broker.run(
             effect,
@@ -95,7 +101,7 @@ class Orchestrator:
                                    cost_status=res.cost_status, transient=res.transient)
         if res.status == "ok":
             return ExecutionResult("ok", agent, res.output, cost=res.cost, cost_status=res.cost_status)
-        return ExecutionResult(res.status, agent, reason=res.reason)
+        return ExecutionResult(res.status, agent, reason=res.reason, approval_id=res.approval_id)
 
 
 def _missing_outputs(outputs: list[str], output: Any) -> str | None:
