@@ -1,7 +1,7 @@
 # CLAUDE.md — NAYMERA
 
 Agent sistemi: CEO agent + şöbə agentləri. Stack: Python 3.12, pytest, SQLite.
-Mərhələ 1-6 hazırdır: agent yaratma, təhlükəsizlik qapısı, reyestr, orkestrator, CEO agent, xərc kitabı, büdcə siyasəti, asılılıq qrafı və retry (bax: STATUS.md).
+Mərhələ 1-7 hazırdır (7: Effect Broker — bütün yan təsirlərin yeganə yolu): agent yaratma, təhlükəsizlik qapısı, reyestr, orkestrator, CEO agent, xərc kitabı, büdcə siyasəti, asılılıq qrafı və retry (bax: STATUS.md).
 
 ## Mütləq qaydalar
 
@@ -18,6 +18,7 @@ Mərhələ 1-6 hazırdır: agent yaratma, təhlükəsizlik qapısı, reyestr, or
 4. **"Hazırdır" deməzdən əvvəl** `test-gate` skill-ini işlət; real pytest
    nəticəsini göstər. Çalışdırmadığını "keçdi" kimi təqdim etmə.
 5. Təhlükəli/geri qaytarılmaz əməliyyatdan əvvəl `safety-layer` skill-ini işlət.
+   Yeni yan təsirli kod (alət, agent icrası) yalnız `EffectBroker.run` üzərindən işləyir; alətləri `@broker_only` ilə bəzə.
 6. Soruşulmayan kod yazma: tapşırığın çərçivəsindən kənara çıxma.
 
 ## Əmrlər
@@ -50,12 +51,13 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 │   ├── factory.py             # məqsəddən təsvir (LLM interfeysi, MockLLM)
 │   ├── verify.py              # test tapşırığı ilə yoxlama -> logs/errors.jsonl
 │   ├── registry.py            # SQLite agent reyestri (data/naymera.db)
-│   ├── orchestrator.py        # şöbəyə yönləndirmə; icra yalnız gate ilə
+│   ├── orchestrator.py        # şöbəyə yönləndirmə; runner yalnız broker-in icra mərhələsində çağırılır
 │   ├── workflow.py            # tapşırıq DAG-ı: doğrulama (dövr, olmayan asılılıq), sıra
 │   └── ceo.py                 # CEO: plan, bölgü, toplama, yoxlama, hesabat, run_workflow + retry
 ├── safety/gate.py             # icazə, xərc limiti, təsdiq, audit, stop
+├── safety/broker.py           # Effect Broker: stop -> təkrar -> rezerv -> Gate -> icra -> hesablaşma; @broker_only
 ├── safety/ledger.py           # SQLite xərc kitabı: rezerv/təsdiq/azad, limitlər (data/ledger.db)
-└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration/workflow/retry)
+└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration/workflow/retry/broker)
 ```
 
 Yeni kod əlavə olunanda bu xəritəni yenilə.

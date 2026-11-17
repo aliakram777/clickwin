@@ -272,18 +272,23 @@ def reconcile(ledger: CostLedger, audit_path: str | Path) -> ReconcileReport:
     return rep
 
 
-def log_budget_denial(audit_path: str | Path, agent: str, permission: str, cost: float,
-                      description: str, reason: str) -> None:
-    """Büdcə rədd qərarını audit jurnalına yazır (gate-ə çatmayan hallar). `allowed: false` olduğu üçün
+def log_denial(audit_path: str | Path, agent: str, permission: str, cost: float,
+               description: str, reason: str, source: str) -> None:
+    """Gate-ə çatmayan rədd qərarını (büdcə, stop) audit jurnalına yazır. `allowed: false` olduğu üçün
     reconcile() onu saymır."""
     row = {
         "ts": _now(), "agent": agent, "permission": permission, "cost": cost,
-        "description": description, "allowed": False, "reason": reason, "source": "budget",
+        "description": description, "allowed": False, "reason": reason, "source": source,
     }
     path = Path(audit_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def log_budget_denial(audit_path: str | Path, agent: str, permission: str, cost: float,
+                      description: str, reason: str) -> None:
+    log_denial(audit_path, agent, permission, cost, description, reason, "budget")
 
 
 def _entry(r: tuple) -> LedgerEntry:
