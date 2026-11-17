@@ -391,6 +391,19 @@ class ApprovalGateway:
         return self._core.decide(approval_id, principal, False, note)
 
 
+class ApprovalReader:
+    """YALNIZ OXU üzü (təhlil/bildiriş üçün): gözləyən təsdiqləri göstərir; təsdiq/rədd/istifadə imkanı yoxdur."""
+
+    def __init__(self, core: _Core) -> None:
+        self._core = core
+
+    def pending(self) -> list[Ticket]:
+        return self._core.pending()
+
+    def get(self, approval_id: str) -> Ticket | None:
+        return self._core.get(approval_id)
+
+
 class ApprovalService:
     def __init__(
         self,
@@ -405,6 +418,7 @@ class ApprovalService:
         self._core = _Core(db_path, audit_path, owners, ttl_seconds, clock, allow_mock, channels)
         self.client = ApprovalClient(self._core)
         self.gateway = ApprovalGateway(self._core)
+        self.reader = ApprovalReader(self._core)
 
     def close(self) -> None:
         self._core.close()
