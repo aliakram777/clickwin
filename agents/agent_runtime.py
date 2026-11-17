@@ -15,9 +15,10 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
-from agents.agent_factory import (AgentFactory, AgentRecord, AgentReport, DispatchAuthorization, ExchangeRejected, FactoryDenied, TaskRecord,
+from agents.agent_factory import (AgentFactory, AgentRecord, AgentReport, ExchangeRejected, FactoryDenied, TaskRecord,
                                   validate_exchange)
-from agents.factory_auth import SignedPrincipal
+from agents.factory_auth import DispatchAuthorization
+from agents.factory_auth import DispatcherIssuer, SystemIssuer
 from agents.hybrid import HybridRouter, RouteResult
 from agents.llm import SpendScope, spend_scope
 from agents.memory import Actor, MemoryDenied, MemoryService
@@ -95,10 +96,12 @@ class DispatchResult:
 
 
 class AgentDispatcher:
-    def __init__(self, factory: AgentFactory, orchestrator: Orchestrator, runner: AgentLLMRunner, *, principal: SignedPrincipal, approvals: Any = None,
-                 max_attempts: int = 2, max_output_chars: int = 3500, max_workers: int = 4) -> None:
-        """`principal`: `PrincipalAuthority.dispatcher()` ilə imzalanmış icra qatı şəxsiyyəti. Saxta/imzasız şəxsiyyət ilə heç bir tapşırıq tutulmur."""
-        self.factory, self.orchestrator, self.runner, self.principal = factory, orchestrator, runner, principal
+    def __init__(self, factory: AgentFactory, orchestrator: Orchestrator, runner: AgentLLMRunner, *, issuer: DispatcherIssuer, system: SystemIssuer,
+                 approvals: Any = None, max_attempts: int = 2, max_output_chars: int = 3500, max_workers: int = 4) -> None:
+        """`issuer`/`system`: etibarlı bootstrap-ın verdiyi rola bağlı imza obyektləri (dispetçer şəxsiyyəti + hərəkətə bağlı səlahiyyət; sistem şəxsiyyəti
+        yalnız ardıcıl uğursuzluqda agenti dayandırmaq üçün). Dispetçer etibarlı (agentə baxmayan) komponentdir; agentlər ona çata bilməməlidir."""
+        self.factory, self.orchestrator, self.runner = factory, orchestrator, runner
+        self._issuer, self._system = issuer, system
         self.approvals = approvals  # YALNIZ OXU üzü (`ApprovalReader`): gözləyən təsdiqi Broker-i çağırmadan yoxlamaq üçün
         self.max_attempts, self.max_output_chars, self.max_workers = max_attempts, max_output_chars, max_workers
         self._exec_lock = threading.Lock()   # Orkestrator/Broker sorğuları ARDICIL icra olunur (SQLite və audit bütövlüyü)
@@ -131,54 +134,79 @@ class AgentDispatcher:
     # --- icra ---
     def execute(self, task_id: str) -> DispatchResult:
         rt = self.factory.runtime
-        claimed = rt.claim(task_id, self.principal)
-        t = claimed.task if claimed is not None else None
+        t = rt.claim(task_id, self._issuer.principal())
         if t is None:
             cur = self.factory.view.task(task_id)
             return DispatchResult("not_claimable", task_id, reason="tapşırıq tutula bilmədi (artıq icra olunub/olunur və ya agent aktiv deyil)",
                                   attempts=cur.attempts if cur else 0)
         agent = self.factory.view.agent(t.agent_id)
         assert agent is not None
-        auth = claimed.authorization
         if _sha(t.prompt) != t.prompt_sha:   # F-2: saxlanmış mətn yaradılışdan sonra dəyişdirilib -> icra və ya təsdiq sorğusu yoxdur
             reason = "prompt_integrity: tapşırıq mətni dəyişdirilib"
-            rt.fail(auth, reason, retry=False)
+            self._fail(t, reason, retry=False)
             return DispatchResult("failed", t.task_id, reason=reason, attempts=t.attempts)
         if t.approval_id and self.approvals is not None:
             ticket = self.approvals.get(t.approval_id)
             if ticket is not None and ticket.status == "pending":   # sahib hələ qərar verməyib: icra yoxdur, gözləmə davam edir
-                rt.await_approval(auth, t.approval_id)
+                self._await(t, t.approval_id)
                 return DispatchResult("awaiting_approval", t.task_id, approval_id=t.approval_id, reason="sahib təsdiqi gözlənilir", attempts=t.attempts)
         orch_task = Task(agent.department, approval_input(agent, t), t.permission, t.cost, t.title, op_id=t.run_op,
                          approval_id=t.approval_id, agent=agent.name)
         with self._exec_lock:
             res = self.orchestrator.execute(orch_task)
         if res.status == "pending_approval":
-            rt.await_approval(auth, res.approval_id)
+            self._await(t, res.approval_id)
             return DispatchResult("awaiting_approval", t.task_id, approval_id=res.approval_id, reason=res.reason, attempts=t.attempts)
         if res.status == "ok":
-            return self._finish(agent, t, auth, res.output, res.cost)
+            return self._finish(agent, t, res.output, res.cost)
         retry = res.status == "error" and bool(res.transient) and t.attempts < self.max_attempts
         reason = f"{res.status}: {res.reason}"[:200]
-        rt.fail(auth, reason, retry=retry)
+        self._fail(t, reason, retry=retry)
         return DispatchResult("retry" if retry else "failed", t.task_id, reason=reason, attempts=t.attempts)
 
-    def _finish(self, agent: AgentRecord, t: TaskRecord, auth: DispatchAuthorization, output: Any, cost: float | None) -> DispatchResult:
+    # --- hərəkətə bağlı bir-dəfəlik səlahiyyət (yalnız dispetçer imzalayır) ---
+    def _auth(self, t: TaskRecord, action: str) -> DispatchAuthorization:
+        return self._issuer.authorize(t.task_id, t.agent_id, t.run_op, t.op_id, t.attempts, action)
+
+    def _fail(self, t: TaskRecord, reason: str, *, retry: bool) -> None:
+        try:
+            out = self.factory.runtime.fail(self._auth(t, "fail"), reason, retry=retry)
+        except FactoryDenied:   # tapşırıq artıq başqa vəziyyətdədir (məs. agent dayandırılıb): uğursuzluq sayğacı artmır
+            return
+        if out.stop_recommended:
+            try:
+                self.factory.control.stop(t.agent_id, self._system.principal(), "ardıcıl uğursuzluq: avtomatik dayandırıldı")
+            except FactoryDenied:
+                pass
+
+    def _await(self, t: TaskRecord, approval_id: str) -> None:
+        try:
+            self.factory.runtime.await_approval(self._auth(t, "await_approval"), approval_id)
+        except FactoryDenied:
+            pass
+
+    def _note_success(self, t: TaskRecord) -> None:
+        try:
+            self.factory.runtime.note_success(self._auth(t, "note_success"))
+        except FactoryDenied:
+            pass
+
+    def _finish(self, agent: AgentRecord, t: TaskRecord, output: Any, cost: float | None) -> DispatchResult:
         rt = self.factory.runtime
         text = output.get("netice") if isinstance(output, dict) else None
         try:
             ex = validate_exchange(text, source=agent.name, max_chars=self.max_output_chars)
         except ExchangeRejected as exc:
             reason = f"failed_check:{exc.code}"
-            rt.fail(auth, reason, retry=False)
+            self._fail(t, reason, retry=False)
             return DispatchResult("failed", t.task_id, reason=reason, attempts=t.attempts)
         try:
             report = self.factory.handle(agent.agent_id).submit_result(t.task_id, ex.text, cost=min(float(cost or 0.0), t.cost),
-                                                                      authorization=auth)
+                                                                      authorization=self._auth(t, "submit_result"))
         except FactoryDenied as exc:
-            rt.fail(auth, f"report_rejected:{exc.code}", retry=False)
+            self._fail(t, f"report_rejected:{exc.code}", retry=False)
             return DispatchResult("failed", t.task_id, reason=f"report_rejected:{exc.code}", attempts=t.attempts)
-        rt.note_success(auth)
+        self._note_success(t)
         out = output if isinstance(output, dict) else {}
         return DispatchResult("done", t.task_id, report=report, engine=str(out.get("engine", "")), is_mock=bool(out.get("is_mock", False)),
                               attempts=t.attempts)

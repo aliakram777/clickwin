@@ -20,13 +20,14 @@ from agents.spec import AgentSpec
 from agents.workflow import PlanStep
 from safety.approvals import ApprovalService, Principal
 from safety.ledger import CostLedger, reconcile
+from tests.factory_keys import MOCK as MOCK_SIGNED, OWNER as OWNER_SIGNED, STRANGER as STRANGER_SIGNED, SYSTEM as SYSTEM_SIGNED, T0, ring
 
 ROOT = Path(__file__).resolve().parent.parent
-HUMAN = Principal("owner", "human", "web")
-MOCK = Principal("owner", "mock", "test")
-SYS = Principal("ceo", "system", "internal")
+HUMAN = OWNER_SIGNED
+MOCK = MOCK_SIGNED
+SYS = SYSTEM_SIGNED
 AGENT_P = Principal("res_agent", "agent", "internal")
-STRANGER = Principal("yad", "human", "telegram")
+STRANGER = STRANGER_SIGNED
 
 
 def spec(name, perms=("read_files",), limit=5.0):
@@ -44,7 +45,7 @@ def env(tmp_path):
     audit = tmp_path / "audit.jsonl"
 
     def make(allow_mock=False):
-        return Company(reg, tmp_path / "company.db", audit, owners={"owner"}, allow_mock=allow_mock)
+        return Company(reg, tmp_path / "company.db", audit, owners={"owner"}, allow_mock=allow_mock, verifier=ring(lambda: T0))
 
     return reg, make, audit, tmp_path
 

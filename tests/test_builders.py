@@ -8,7 +8,7 @@ import pytest
 from agents.agent_roles import ROLE_CATALOG
 from agents.builders import BUILDERS, BuilderRegistry, BuildPlan, NotConfigured
 from agents.team import TeamPlan, TeamRunner
-from tests.factory_keys import SYSTEM
+
 from tests.test_agent_runtime import world  # noqa: F401  (fixture)
 
 LEAK = "sk-test-" + "FAKEKEY1234567890abcdef"
@@ -73,7 +73,7 @@ def test_only_planning_steps_become_a_team_plan_and_run_as_a_simulation(bid, wor
     team_plan = b.to_team_plan(plan)
     assert isinstance(team_plan, TeamPlan) and team_plan.source == "rules"
     assert all(s.permission == "read_files" for s in team_plan.stages) and len(team_plan.stages) == len([s for s in plan.steps if s.phase == "planning"])
-    runner = TeamRunner(w.factory, w.disp, w.tmp / "team.db", w.audit, clock=w.clock, system=SYSTEM)
+    runner = TeamRunner(w.factory, w.disp, w.tmp / "team.db", w.audit, clock=w.clock, system=w.trust.system)
     w.cloud._state, w.cloud.is_mock = "simulation", True
     rep = runner.run(team_plan)
     assert rep.status == "ok" and rep.is_mock is True and rep.product is not None and rep.product.is_mock is True

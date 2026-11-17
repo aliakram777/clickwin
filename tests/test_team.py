@@ -19,7 +19,7 @@ LEAK = "sk-test-" + "FAKEKEY1234567890abcdef"
 @pytest.fixture
 def team(world):
     w = world
-    w.team = TeamRunner(w.factory, w.disp, w.tmp / "team.db", w.audit, clock=w.clock, system=SYSTEM)
+    w.team = TeamRunner(w.factory, w.disp, w.tmp / "team.db", w.audit, clock=w.clock, system=w.trust.system)
     return w
 
 
@@ -251,7 +251,7 @@ def test_team_runner_persists_runs_across_restarts(team):
     w = team
     plan = TeamPlanner().propose("tədqiqat apar")
     first = w.team.run(plan)
-    again = TeamRunner(w.factory, w.disp, w.tmp / "team.db", w.audit, clock=w.clock, system=SYSTEM)
+    again = TeamRunner(w.factory, w.disp, w.tmp / "team.db", w.audit, clock=w.clock, system=w.trust.system)
     assert again.get(plan.plan_id) == first and again.get("plan_yoxdur") is None
 
 

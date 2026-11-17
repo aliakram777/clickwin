@@ -24,6 +24,7 @@ from api.chat import ChatService, ConversationStore, HybridReplyEngine, RuleAssi
 from api.events import ApprovalEventChannel
 from api.jobs import JobService
 from safety.approvals import ApprovalService
+from runtime.factory_bootstrap import FactoryStack, TrustAnchor
 from safety.ledger import CostLedger
 
 
@@ -41,15 +42,16 @@ class Services:
     events: EventStore
     router: HybridRouter
     data_dir: Path
+    factory: FactoryStack | None = None   # yalnız etibarlı server kodu; agentlərə verilmir
 
 
 def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: float = 0.0,
-              https: bool = False, cloud_engine: Any = None, local_engine: Any = None) -> Services:
+              https: bool = False, cloud_engine: Any = None, local_engine: Any = None, trust: TrustAnchor | None = None) -> Services:
     d = Path(data_dir)
     d.mkdir(parents=True, exist_ok=True)
     audit, stop = d / "audit.jsonl", d / "STOP"
     reg = Registry(d / "naymera.db")
-    company = Company(reg, d / "company.db", audit, owners={owner_id})
+    company = Company(reg, d / "company.db", audit, owners={owner_id}, verifier=trust.verifier if trust is not None else None)
     events = EventStore(d / "events.db")
     ledger = CostLedger(d / "ledger.db")
     approvals = ApprovalService(d / "approvals.db", audit, owners={owner_id}, channels=[ApprovalEventChannel(events)])
@@ -76,4 +78,12 @@ def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: fl
     app = ApiApp(auth=auth, chat=chat, events=events, stop_path=stop, gateway=approvals.gateway,
                  reader=approvals.reader, memory=memory, company=company.view, proactive=proactive, jobs=jobs,
                  voice=MockVoiceSynthesizer(), owner_id=owner_id, audit_path=audit, llm_is_mock=True, https=https, ai=router)
-    return Services(app, auth, approvals, company, memory, events, router, d)
+    stack = None
+    if trust is not None:   # etibarlı bootstrap: fabrik qurulur, yalnız dar imkanlar paylanır (agent icraçısı/real provayder yenə də ayrıca qoşulur)
+        stack = trust.build_factory(
+            company=company, auth=auth, owners={owner_id}, db_path=d / "factory.db", audit_path=audit, workspace_root=d / "workspaces",
+            team_db=d / "team.db", router=router, approvals_reader=approvals.reader, memory=lambda: memory.reader.search("", category="note", limit=3),
+            global_limit=lambda: policy.global_limit,
+            orchestrator_factory=lambda runner: Orchestrator(reg, runner, audit_path=audit, stop_path=stop, errors_path=d / "errors.jsonl",
+                                                             ledger=ledger, approvals=approvals.client, policy=policy))
+    return Services(app, auth, approvals, company, memory, events, router, d, stack)

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 from agents.ceo import JobReport, StepReport
+from agents.factory_auth import CredentialError, Keyring
 from agents.memory import Actor, MemoryDenied, MemoryService, WriteResult, detect_secrets
 from agents.orchestrator import Task
 from agents.registry import Registry, RegistryError
@@ -104,7 +105,8 @@ def _valid_money(v: Any) -> bool:
 
 class _Core:
     def __init__(self, registry: Registry, db_path: str | Path, audit_path: str | Path, owners: Iterable[str],
-                 allow_mock: bool, clock: Callable[[], float]) -> None:
+                 allow_mock: bool, clock: Callable[[], float], verifier: Keyring | None = None) -> None:
+        self.verifier = verifier   # YALNIZ yoxlama (açıq açarlar): şəxsi açar/imza imkanı yoxdur
         self.owners = frozenset(owners)
         if not self.owners or not all(isinstance(o, str) and o.strip() for o in self.owners):
             raise ValueError("şirkət üçün boş olmayan sahib siyahısı tələb olunur")
@@ -137,11 +139,23 @@ class _Core:
         self.audit("company_denied", **fields)
         return CompanyDenied(reason, code)
 
-    def authorize(self, principal: Principal, op: str, expansion: bool) -> None:
+    def identify(self, principal: Principal, op: str) -> None:
+        """Kimlik yoxlaması (agent/rol/imza/vaxt/ləğv). Hər imtiyazlı əməliyyatın ƏVVƏLİNDƏ çağırılır: autentifikasiyasız çağıran agentin mövcudluğunu belə öyrənmir."""
         if not isinstance(principal, Principal):
             raise self.reject(op, "unauthorized", "principal tələb olunur")
         if principal.kind == "agent":
             raise self.reject(op, "self_grant", "agent səlahiyyət/büdcə təyin edə və ya dəyişə bilməz", principal)
+        if self.verifier is None:
+            raise self.reject(op, "owner_auth_unavailable", "etibarlı autentifikasiya qurulmayıb: imtiyazlı əməliyyat bağlıdır", principal)
+        try:
+            self.verifier.check_principal(principal, "owner", "system", "mock_owner")
+        except CredentialError as exc:
+            raise self.reject(op, exc.code, str(exc), principal) from None
+
+    def authorize(self, principal: Principal, op: str, expansion: bool) -> None:
+        """Hər imtiyazlı əməliyyat üçün Company şəxsiyyəti MÜSTƏQİL yoxlayır: yalnız etibarlı açarla imzalanmış, vaxtı keçməmiş, ləğv olunmamış
+        `owner`/`system`/`mock_owner` etibarnaməsi qəbul olunur. Özü yaradılmış `Principal` heç vaxt səlahiyyət vermir; yoxlayıcı yoxdursa əməliyyat bağlıdır."""
+        self.identify(principal, op)
         if principal.kind == "system" and expansion:
             raise self.reject(op, "system_cannot_expand", "sistem səlahiyyəti genişləndirə bilməz (yalnız sahib)",
                             principal)
@@ -334,6 +348,7 @@ class CompanyAdmin:
         """Geri qaytarıla bilən dayandırma: effektiv icazələr boşaldılır, səlahiyyət/büdcə saxlanılır. Sistem və ya sahib (azaltma)."""
         c = self._core
         op = "suspend"
+        c.identify(principal, op)
         row = c._row(name)
         if row is None:
             raise c.reject(op, "unknown_agent", "agent tapılmadı", principal)
@@ -351,6 +366,7 @@ class CompanyAdmin:
         """Əvvəlki səlahiyyəti BƏRPA edir (yeni səlahiyyət vermir). Sahibin dayandırdığını yalnız sahib davam etdirə bilər."""
         c = self._core
         op = "resume"
+        c.identify(principal, op)
         row = c._row(name)
         if row is None:
             raise c.reject(op, "unknown_agent", "agent tapılmadı", principal)
@@ -368,6 +384,7 @@ class CompanyAdmin:
     def set_authority(self, name: str, authority: Authority, principal: Principal) -> CompanyAgent:
         c = self._core
         op = "set_authority"
+        c.identify(principal, op)
         row = c._row(name)
         if row is None:
             raise c.reject(op, "unknown_agent", "agent tapılmadı", principal)
@@ -389,6 +406,7 @@ class CompanyAdmin:
     def set_budget(self, name: str, budget: float, principal: Principal) -> CompanyAgent:
         c = self._core
         op = "set_budget"
+        c.identify(principal, op)
         row = c._row(name)
         if row is None:
             raise c.reject(op, "unknown_agent", "agent tapılmadı", principal)
@@ -406,6 +424,7 @@ class CompanyAdmin:
     def retire(self, name: str, principal: Principal) -> CompanyAgent:
         c = self._core
         op = "retire"
+        c.identify(principal, op)
         row = c._row(name)
         if row is None:
             raise c.reject(op, "unknown_agent", "agent tapılmadı", principal)
@@ -431,8 +450,8 @@ class CompanyAdmin:
 class Company:
     def __init__(self, registry: Registry, db_path: str | Path = DEFAULT_DB,
                  audit_path: str | Path = DEFAULT_AUDIT, owners: Iterable[str] = (), allow_mock: bool = False,
-                 clock: Callable[[], float] = time.time) -> None:
-        self._core = _Core(registry, db_path, audit_path, owners, allow_mock, clock)
+                 clock: Callable[[], float] = time.time, verifier: Keyring | None = None) -> None:
+        self._core = _Core(registry, db_path, audit_path, owners, allow_mock, clock, verifier)
         self.view = CompanyView(self._core)
         self.admin = CompanyAdmin(self._core)
 
