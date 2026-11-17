@@ -65,6 +65,17 @@ class Challenge:
     expires_in: int
 
 
+@dataclass(frozen=True)
+class StepUpReceipt:
+    """Uğurlu step-up yoxlamasının qəbzi. Qəbzin həqiqiliyi OBYEKTDƏ yox, serverin bazasındakı bir-dəfəlik qeyddədir (təsadüfi 128-bit id +
+    cihaz/əməliyyat bağlılığı): özü qurulmuş qəbz `consume_receipt` tərəfindən qəbul olunmur."""
+    id: str
+    device_id: str
+    action: str
+    subject: str
+    payload_hash: str
+
+
 def _h(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -72,8 +83,9 @@ def _h(value: str) -> str:
 class AuthService:
     def __init__(self, db_path: str | Path, audit_path: str | Path, clock: Callable[[], float] = time.time,
                  owner_id: str = "owner", access_ttl: int = 900, refresh_ttl: int = 30 * 86400,
-                 pairing_ttl: int = 600, challenge_ttl: int = 60) -> None:
+                 pairing_ttl: int = 600, challenge_ttl: int = 60, receipt_ttl: int = 120) -> None:
         self.clock, self.owner_id = clock, owner_id
+        self.receipt_ttl = receipt_ttl
         self.access_ttl, self.refresh_ttl = access_ttl, refresh_ttl
         self.pairing_ttl, self.challenge_ttl = pairing_ttl, challenge_ttl
         self.audit_path = Path(audit_path)
@@ -91,6 +103,8 @@ class AuthService:
             "CREATE TABLE IF NOT EXISTS challenges (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, nonce TEXT NOT NULL, "
             "action TEXT NOT NULL, subject TEXT NOT NULL, payload_hash TEXT NOT NULL, decision TEXT NOT NULL, "
             "expires REAL NOT NULL, used INTEGER NOT NULL DEFAULT 0)",
+            "CREATE TABLE IF NOT EXISTS stepup_receipts (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, action TEXT NOT NULL, "
+            "subject TEXT NOT NULL, payload_hash TEXT NOT NULL, expires REAL NOT NULL, used INTEGER NOT NULL DEFAULT 0)",
             "CREATE TABLE IF NOT EXISTS rate (key TEXT NOT NULL, ts REAL NOT NULL)",
             "CREATE INDEX IF NOT EXISTS ix_rate ON rate(key, ts)",
         ):
@@ -268,8 +282,8 @@ class AuthService:
         return Challenge(cid, nonce, self.challenge_ttl)
 
     def verify_proof(self, device_id: str, challenge_id: Any, action: str, subject: str, payload_hash: str,
-                     decision: str, proof: Any) -> None:
-        """Sübutu yoxlayır. Uğursuzluqda AuthError(403); təkrar uğursuzluqda cihaz müvəqqəti bloklanır (429)."""
+                     decision: str, proof: Any) -> StepUpReceipt:
+        """Sübutu yoxlayır. Uğursuzluqda AuthError(403); təkrar uğursuzluqda cihaz müvəqqəti bloklanır (429). Uğurda bir-dəfəlik `StepUpReceipt` qaytarır."""
         fail_key = f"stepfail:{device_id}"
         if self._failures(fail_key, 600) >= 5:
             self._audit("auth_stepup_denied", device_id=device_id, reason="lockout")
@@ -298,3 +312,25 @@ class AuthService:
         if not p256.verify(base64.b64decode(dev["public_key"]), msg, sig):
             raise deny("bad_proof")
         self._audit("auth_stepup_ok", device_id=device_id, action=action, subject=subject)
+        rid = secrets.token_hex(16)
+        self._conn.execute("INSERT INTO stepup_receipts (id, device_id, action, subject, payload_hash, expires) VALUES (?, ?, ?, ?, ?, ?)",
+                           (rid, device_id, action, subject, payload_hash, self.clock() + self.receipt_ttl))
+        return StepUpReceipt(rid, device_id, action, subject, payload_hash)
+
+    def consume_receipt(self, receipt: Any, action_prefix: str) -> tuple[str, str] | None:
+        """Qəbzi YALNIZ BİR DƏFƏ və yalnız gözlənilən əməliyyat növü (`action_prefix`) üçün qəbul edir. Qəbz bazadakı qeydlə eyni olmalı, vaxtı keçməməli,
+        cihaz hələ aktiv olmalıdır. Uğurda `(owner_id, device_id)`; əks halda None (heç bir izahat vermir)."""
+        if not isinstance(receipt, StepUpReceipt) or not isinstance(action_prefix, str) or not action_prefix:
+            return None
+        row = self._conn.execute("SELECT * FROM stepup_receipts WHERE id = ?", (receipt.id,)).fetchone() if isinstance(receipt.id, str) else None
+        if row is None or (row["device_id"], row["action"], row["subject"], row["payload_hash"]) != \
+                (receipt.device_id, receipt.action, receipt.subject, receipt.payload_hash) or not str(row["action"]).startswith(action_prefix):
+            self._audit("auth_receipt_rejected", reason="unknown_or_mismatch")
+            return None
+        dev = self._device(row["device_id"])
+        burned = self._conn.execute("UPDATE stepup_receipts SET used = 1 WHERE id = ? AND used = 0 AND expires > ?", (receipt.id, self.clock()))
+        if burned.rowcount != 1 or dev is None or dev["status"] != "active":
+            self._audit("auth_receipt_rejected", device_id=row["device_id"], reason="used_expired_or_inactive")
+            return None
+        self._audit("auth_receipt_consumed", device_id=row["device_id"], action=row["action"])
+        return self.owner_id, row["device_id"]

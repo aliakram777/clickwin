@@ -27,7 +27,7 @@ Mərhələ 1-17 hazırdır (17: real AI runtime + agent fabrikası + çoxagentli
    Həssas effektlər `ApprovalService` ilə təsdiqlənir: agentlər/broker `ApprovalGateway`-ə (approve/deny) çıxış almır; testdəki mock təsdiqi (`kind="mock"`) real istifadəçi təsdiqi kimi təqdim olunmur.
 6. **API/Android:** `api/` modulları `safety.broker/gate/tools/workspace/ledger` import etmir və env/şəbəkə istifadə etmir; təsdiq yalnız cihazın Keystore açarı ilə biometrik imza (step-up) ilə — serverdə yalnız açıq açar, şəxsi açar/paylaşılan sirr yox (səs/söhbət mətni heç vaxt); Android backend-də olmayan imkanı (`/v1/capabilities`) işləyirmiş kimi göstərmir, mock rejimini açıq göstərir; APK-da API açarı olmaz; build edilmədiyi halda "APK hazırdır" demə; APK imzalama/yayımlama (açar, hesab, `signingConfigs`) sahib qərarı olmadan qurulmur.
 7. **Hibrid AI:** hər sorğuya yalnız bir mühərrik cavab verir (`request_id` ilə təkrar icra yoxdur); CLOUD rejimi səssiz Local-a keçmir; qurulmayan/simulyasiya mühərrik real imkan kimi göstərilmir; real Cloud `cloud_paid_use`, yaddaşın Cloud-a ötürülməsi `cloud_data_transfer`+məxfilik siyasəti, cihazda real model `local_resource_use` razılığı olmadan işləmir (razılıq vermək Keystore imzası ilə); sirr bənzər mətn Cloud-a getmir; mühərrik çıxışı etibarsızdır; `agents/hybrid.py` Broker/Gate/Approval/CEO/yaddaş-yazma import etmir; API açarı APK-da olmaz (`HYBRID_AI.md`).
-8. **Agent fabrikası:** yeni agent yalnız MƏHDUD yaradılır (`read_files`, büdcə 0 AZN, ötürmə yox); agent öz icazəsini/büdcəsini artıra bilməz (yalnız `request_permission`; həll və büdcə tavanı yalnız sahib); bütün agent işləri `AgentDispatcher` → Orchestrator → Broker/Gate/Ledger/Təsdiq yolundadır, həssas icazə sahib təsdiqi tələb edir (təsdiqsiz heç nə icra olunmur); agentlərarası məlumat etibarsızdır (`<untrusted_agent_output>`, sirr rədd, təlimat bənzərliyi işarələnir); `agents/agent_*.py`/`team.py`/`builders.py` Broker/Gate/Ledger/Tools/Approvals-ı birbaşa import etmir və `approve/deny` adlı atribut istifadə etmir; builder-lər `not_configured`, plan SİMULYASİYA; real Cloud yalnız `runtime/env.py` şərtləri (açar+URL+model+büdcə>0+qiymət+ledger) + `cloud_paid_use` razılığı ilə; şəbəkə/env yalnız `runtime/` və `tools/`-da (`AGENT_FACTORY.md`). Fabrik şəxsiyyəti yalnız `PrincipalAuthority` imzası ilə qəbul olunur (özü yaradılmış `Principal` rədd; açar yoxdursa imtiyazlı əməliyyatlar bağlı); agent nəticəsi yalnız tapşırığa bağlı dispetçer səlahiyyəti ilə yazılır; təsdiqlənən giriş = icra olunan giriş (icradan əvvəl hash yoxlaması); LLM xərci hər ödənişli sorğudan əvvəl Ledger-də agentin adına rezerv edilir (0 büdcə = ödənişli Cloud yoxdur).
+8. **Agent fabrikası:** yeni agent yalnız MƏHDUD yaradılır (`read_files`, büdcə 0 AZN, ötürmə yox); agent öz icazəsini/büdcəsini artıra bilməz (yalnız `request_permission`; həll və büdcə tavanı yalnız sahib); bütün agent işləri `AgentDispatcher` → Orchestrator → Broker/Gate/Ledger/Təsdiq yolundadır, həssas icazə sahib təsdiqi tələb edir (təsdiqsiz heç nə icra olunmur); agentlərarası məlumat etibarsızdır (`<untrusted_agent_output>`, sirr rədd, təlimat bənzərliyi işarələnir); `agents/agent_*.py`/`team.py`/`builders.py` Broker/Gate/Ledger/Tools/Approvals-ı birbaşa import etmir və `approve/deny` adlı atribut istifadə etmir; builder-lər `not_configured`, plan SİMULYASİYA; real Cloud yalnız `runtime/env.py` şərtləri (açar+URL+model+büdcə>0+qiymət+ledger) + `cloud_paid_use` razılığı ilə; şəbəkə/env yalnız `runtime/` və `tools/`-da (`AGENT_FACTORY.md`). Fabrik və `Company` şəxsiyyəti yalnız Ed25519 imzalı, qısa ömürlü, ləğv oluna bilən etibarnamə ilə qəbul edir (özü yaradılmış `Principal` rədd; yoxlayıcı/açar yoxdursa imtiyazlı əməliyyatlar bağlı; şəxsi açar yalnız `runtime/factory_bootstrap.py` `TrustAnchor`-undadır, agentə baxan heç bir obyektdə yox); sahib etibarnaməsi yalnız `api/auth.py` step-up qəbzi ilə (`api/owner_gate.py`); agent nəticəsi yalnız hərəkətə bağlı bir-dəfəlik dispetçer səlahiyyəti ilə yazılır; təsdiqlənən giriş = icra olunan giriş (icradan əvvəl hash yoxlaması); LLM xərci hər ödənişli sorğudan əvvəl Ledger-də agentin adına rezerv edilir (0 büdcə = ödənişli Cloud yoxdur).
 9. Soruşulmayan kod yazma: tapşırığın çərçivəsindən kənara çıxma.
 
 ## Əmrlər
@@ -50,7 +50,7 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 ├── HYBRID_AI.md               # hibrid AI arxitekturası, siyasətlər, lokal model araşdırması, məhdudiyyətlər
 ├── ROADMAP.md                 # məhsul yol xəritəsi: mərhələlər, arxitektura, təhlükəsizlik, Android-first, Builder planı
 ├── STATUS.md                  # cari vəziyyət (hər əhəmiyyətli işdən sonra yenilə)
-├── requirements.txt           # iş vaxtı asılılıqları (pyyaml)
+├── requirements.txt           # iş vaxtı asılılıqları (pyyaml, cryptography — Ed25519)
 ├── pytest.ini                 # testpaths, pythonpath
 ├── .gitignore                 # .env, .venv, logs/, *.db və s.
 ├── .github/workflows/ci.yml   # GitHub Actions: pytest
@@ -73,7 +73,7 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 │   ├── agent_roles.py         # 8 rol şablonu (məhdud icazə, alətlər not_configured, təhlükəsizlik təlimatı)
 │   ├── agent_factory.py       # agent fabriki: yaradılış, həyat dövrü, tapşırıq/ötürmə qeydi, hesabat, audit (icra YOXDUR)
 │   ├── agent_runtime.py       # AgentDispatcher/AgentLLMRunner: icra Orchestrator->Broker yolunda, təsdiq-giriş bağlılığı (F-2), agent xərc əhatəsi (F-3), paralel generasiya
-│   ├── factory_auth.py        # PrincipalAuthority/SignedPrincipal: imzalanmış sahib/sistem/dispetçer şəxsiyyəti (F-1); açar yalnız server mühitində
+│   ├── factory_auth.py        # Ed25519: TrustedSigner (şəxsi açar), Keyring (yalnız yoxlama), rola xas imza obyektləri, SignedPrincipal, DispatchAuthorization, açar keyfiyyəti
 │   ├── team.py                # TeamPlanner/TeamRunner: çoxagentli plan, yekun məhsul, CEO hesabatı
 │   ├── builders.py            # Website/App/APK/Video interfeysləri (NOT CONFIGURED, SİMULYASİYA planı)
 │   ├── providers.py           # OpenAI-uyğun provayder adapteri (nəqliyyat inyeksiya olunur; şəbəkə kodu yoxdur)
@@ -83,9 +83,9 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 │   ├── llm.py                 # LLMProvider interfeysi, Secret/konfiqurasiya (env), GuardedLLM limitləri, MockProvider
 │   ├── llm_planner.py         # LLM yalnız TƏKLİF: plan və agent təsviri (ciddi doğrulama); icra CEO/Broker ilə
 │   └── ceo.py                 # CEO: plan, bölgü, toplama, yoxlama, hesabat, run_workflow + retry
-├── api/                       # Android API (stdlib): http.py (App/WSGI), auth.py (cütləşmə, tokenlər, step-up), p256.py (ECDSA P-256 yoxlama), chat.py, events.py, jobs.py, app.py (marşrutlar), bootstrap.py, server.py
+├── api/                       # Android API (stdlib): http.py (App/WSGI), auth.py (cütləşmə, tokenlər, step-up + bir-dəfəlik StepUpReceipt), owner_gate.py (sahib etibarnaməsi yalnız step-up ilə), p256.py (ECDSA P-256 yoxlama), chat.py, events.py, jobs.py, app.py (marşrutlar), bootstrap.py, server.py
 ├── android/                   # Kotlin + Compose layihəsi (build edilməyib: BUILD_STATUS.md, AUDIT.md, DEVICE_TEST.md); jvm-contract/ — Android-dan asılı olmayan Kotlin qatının JVM sınağı; APK-da açar yoxdur
-├── runtime/                   # şəbəkə nəqliyyatı (transport.py) və mühit dəyişənləri (env.py): şəbəkə/env YALNIZ burada
+├── runtime/                   # şəbəkə nəqliyyatı (transport.py), mühit dəyişənləri (env.py) və imza açarı/fabrik bootstrap-ı (factory_bootstrap.py): şəbəkə/env YALNIZ burada
 ├── tools/serve.py             # serveri mühit dəyişənlərindən qurulmuş mühərriklərlə işə salır
 ├── AGENT_FACTORY.md           # agent fabrikası, komanda axını, builder bünövrəsi, real AI runtime, məhdudiyyətlər
 ├── .env.example               # boş server mühit dəyişənləri (açar yoxdur)
@@ -97,7 +97,7 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 ├── safety/tools.py            # Tool Runtime: allowlist, limitlər, SandboxAdapter interfeysi (real OS sandbox YOXDUR)
 ├── safety/workspace.py        # workspace fayl sərhədi (tətbiq səviyyəli) + fs.read/fs.write/fs.list
 ├── safety/ledger.py           # SQLite xərc kitabı: rezerv/təsdiq/azad, limitlər (data/ledger.db)
-└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration/workflow/retry/broker/approvals/approval_broker/workspace/tool_runtime/llm/llm_planner/memory/company/durable/research/proactive/mobile/api_http/api_auth/api_app/api_bootstrap/api_p256/android_integration/android_project/jvm_contract[opt-in]/hybrid_router/hybrid_api/local_models/voice_registry/providers/agent_factory/agent_runtime/factory_hardening/team/builders/company_suspend/orchestrator_target)
+└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration/workflow/retry/broker/approvals/approval_broker/workspace/tool_runtime/llm/llm_planner/memory/company/durable/research/proactive/mobile/api_http/api_auth/api_app/api_bootstrap/api_p256/android_integration/android_project/jvm_contract[opt-in]/hybrid_router/hybrid_api/local_models/voice_registry/providers/agent_factory/agent_runtime/factory_hardening/security_boundary/team/builders/company_suspend/orchestrator_target)
 ```
 
 Yeni kod əlavə olunanda bu xəritəni yenilə.

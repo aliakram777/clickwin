@@ -114,10 +114,3 @@ def _build_local(env: Mapping[str, str], transport: Transport | None, notes: lis
     notes.append("local: şəxsi server qoşulub (real server; modelin yüklənməsi serverdən asılıdır)")
     return LocalEngine(OpenAICompatLocalRuntime(provider, langs), consent_scope=None)
 
-
-def build_principal_authority(env: Mapping[str, str]) -> Any:
-    """Agent fabrikinin sahib/sistem imza açarı yalnız server mühit dəyişənindən (`NAYMERA_FACTORY_AUTH_KEY`, ≥32 simvol) oxunur.
-    Açar yoxdursa və ya zəifdirsə `None`: fabrikin imtiyazlı əməliyyatları BAĞLI qalır (fail closed). Açar heç vaxt loqa/APK-ya düşmür."""
-    from agents.factory_auth import MIN_KEY_BYTES, PrincipalAuthority
-    raw = (env.get("NAYMERA_FACTORY_AUTH_KEY") or "").encode("utf-8")
-    return PrincipalAuthority(raw) if len(raw) >= MIN_KEY_BYTES else None

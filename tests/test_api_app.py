@@ -27,10 +27,11 @@ from api.http import Request
 from api.jobs import JobService
 from safety.approvals import ApprovalService, Principal
 from safety.ledger import BudgetPolicy, CostLedger, reconcile
+from tests.factory_keys import OWNER as OWNER_SIGNED, T0, ring
 from tests.p256_tools import Keypair
 
 ROOT = Path(__file__).resolve().parent.parent
-OWNER_P = Principal("owner", "human", "web")  # sahib konsolu (test obyekti)
+OWNER_P = OWNER_SIGNED  # sahib etibarnaməsi (test etibar çıpası ilə imzalanıb)
 PLAN_OPS = '{"steps":[{"id":"a","department":"operations","permission":"read_files"}]}'
 PLAN_FIN = ('{"steps":[{"id":"a","department":"operations","permission":"read_files"},'
             '{"id":"b","department":"finance","permission":"spend_money","depends_on":["a"]}]}')
@@ -101,7 +102,7 @@ def world(tmp_path):
     audit = tmp_path / "audit.jsonl"
     stop = tmp_path / "STOP"
     reg = Registry(":memory:")
-    company = Company(reg, tmp_path / "company.db", audit, owners={"owner"})
+    company = Company(reg, tmp_path / "company.db", audit, owners={"owner"}, verifier=ring(lambda: T0))
 
     def spec(name, perms):
         return AgentSpec(name=name, purpose="p", tools=[], permissions=list(perms), inputs=["sorgu"],

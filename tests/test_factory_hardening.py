@@ -1,22 +1,21 @@
-"""Mərhələ 17 təhlükəsizlik möhkəmləndirməsi (audit F-1, F-2, F-3). Heç bir real şəbəkə/ödəniş/açar yoxdur: yalnız saxta provayder və yerli Ledger."""
+"""Mərhələ 17 təhlükəsizlik möhkəmləndirməsi (audit F-1, F-2, F-3). Heç bir real şəbəkə/ödəniş/açar yoxdur: yalnız saxta provayder və yerli Ledger.
+F-1 testləri A-1..A-6 sərhəd düzəlişindən sonra (Ed25519 etibarnamələri) uyğunlaşdırılıb; qoruma səviyyəsi aşağı salınmayıb."""
 import dataclasses
-import pickle
 import sqlite3
 from pathlib import Path
 
 import pytest
 
-from agents.agent_factory import AgentFactory, DispatchAuthorization, FactoryDenied
-from agents.agent_runtime import AgentLLMRunner, AgentDispatcher, approval_input
+from agents.agent_factory import AgentFactory, FactoryDenied
+from agents.agent_runtime import AgentDispatcher, approval_input
 from agents.company import Company
-from agents.factory_auth import PrincipalAuthority, SignedPrincipal
-from agents.hybrid import AiStore, CloudEngine, HybridRouter, Mode
+from agents.factory_auth import DispatchAuthorization, SignedPrincipal, TrustedSigner
+from agents.hybrid import CloudEngine, HybridRouter, Mode
 from agents.llm import (GuardedLLM, LLMBudgetExceeded, LLMConfig, LLMProviderError, LLMResponse, SpendScope, spend_scope)
 from agents.orchestrator import ExecutionError, Task
 from agents.registry import Registry
-from runtime.env import build_principal_authority
 from safety.approvals import Principal
-from tests.factory_keys import AUTH, DISPATCHER, MOCK, OWNER, STRANGER, SYSTEM
+from tests.factory_keys import DISPATCHER, MOCK, OWNER, STRANGER, SYSTEM, T0, auth_for
 from tests.test_agent_runtime import publisher, rows, task, world  # noqa: F401  (fixture)
 from tests.test_hybrid_router import Fake
 
@@ -48,7 +47,6 @@ def test_forged_owner_and_system_principals_are_rejected_everywhere(world):
             with pytest.raises(FactoryDenied) as e:
                 fn(forged)
             assert e.value.code == "forged_principal", (fn, forged)
-    # heç nə dəyişməyib
     assert w.factory.view.agent(a.agent_id).status == "active" and w.factory.view.agent(a.agent_id).budget == 0.0
     assert w.factory.view.task(t.task_id).state == "queued" and len(w.factory.view.agents()) == 1
     assert w.factory.view.policy.global_budget_cap == 0.0
@@ -57,17 +55,18 @@ def test_forged_owner_and_system_principals_are_rejected_everywhere(world):
 
 def test_tampered_or_copied_signatures_do_not_authenticate(world):
     w = world
-    stolen_proof = OWNER.proof
+    stolen = OWNER.signature
     for forged in (dataclasses.replace(OWNER, id="mallory"), dataclasses.replace(OWNER, channel="other"),
-                   SignedPrincipal("owner", "human", "console", "owner", stolen_proof[:-1] + ("0" if stolen_proof[-1] != "0" else "1")),
-                   SignedPrincipal("owner", "human", "console", "owner", ""), SignedPrincipal("owner", "human", "console", "owner", "x" * 64),
+                   dataclasses.replace(OWNER, expires_at=OWNER.expires_at + 1), dataclasses.replace(OWNER, role="system"),
+                   dataclasses.replace(OWNER, signature=stolen[:-2] + ("AA" if not stolen.endswith("AA") else "BB")),
+                   dataclasses.replace(OWNER, signature=""), dataclasses.replace(OWNER, signature="x" * 86),
                    dataclasses.replace(SYSTEM, kind="human", id="owner")):
         with pytest.raises(FactoryDenied) as e:
             w.factory.admin.create_agent("programmer", forged)
-        assert e.value.code in ("forged_principal", "unauthorized"), forged
-    other = PrincipalAuthority(b"\x07" * 32)                                   # başqa açarla imzalanmış şəxsiyyət
+        assert e.value.code in ("forged_principal", "role_not_allowed", "unauthorized"), forged
+    other = TrustedSigner("test-key-1", __import__("secrets").token_bytes(32), clock=lambda: T0)   # başqa açar, eyni id
     with pytest.raises(FactoryDenied) as e:
-        w.factory.admin.create_agent("programmer", other.owner("owner", "console"))
+        w.factory.admin.create_agent("programmer", other.owner_issuer(lambda r: ("owner", "dev"), ttl=600).from_step_up(object()))
     assert e.value.code == "forged_principal"
 
 
@@ -75,7 +74,7 @@ def test_roles_cannot_be_swapped(world):
     w = world
     with pytest.raises(FactoryDenied) as e:                      # dispetçer rolu control əməliyyatı edə bilməz
         w.factory.control.spawn("programmer", DISPATCHER)
-    assert e.value.code == "forged_principal"
+    assert e.value.code == "role_not_allowed"
     with pytest.raises(FactoryDenied) as e:                      # sistem sahib-yalnız əməliyyat edə bilməz
         w.factory.admin.create_agent("programmer", SYSTEM)
     assert e.value.code == "owner_only"
@@ -84,7 +83,7 @@ def test_roles_cannot_be_swapped(world):
     for who in (OWNER, SYSTEM):                                  # sahib/sistem tapşırığı tuta bilməz
         with pytest.raises(FactoryDenied) as e:
             w.factory.runtime.claim(t.task_id, who)
-        assert e.value.code == "forged_principal"
+        assert e.value.code == "role_not_allowed"
     assert w.factory.view.task(t.task_id).state == "queued"
     with pytest.raises(FactoryDenied) as e:                      # sahib siyahısında olmayan imzalanmış şəxs
         w.factory.admin.create_agent("programmer", STRANGER)
@@ -98,7 +97,7 @@ def test_without_trusted_authentication_privileged_operations_fail_closed(tmp_pa
     reg = Registry(":memory:")
     audit = tmp_path / "a.jsonl"
     company = Company(reg, tmp_path / "c.db", audit, owners={"owner"})
-    f = AgentFactory(company, tmp_path / "f.db", audit, tmp_path / "ws", owners={"owner"})          # authority=None
+    f = AgentFactory(company, tmp_path / "f.db", audit, tmp_path / "ws", owners={"owner"})          # verifier=None
     for p in (OWNER, SYSTEM, FORGED_OWNER, FORGED_SYSTEM):
         for fn in (lambda: f.control.spawn("programmer", p), lambda: f.admin.create_agent("programmer", p),
                    lambda: f.admin.set_policy(p, max_agents=3)):
@@ -109,17 +108,6 @@ def test_without_trusted_authentication_privileged_operations_fail_closed(tmp_pa
         f.runtime.claim("tsk_x", DISPATCHER)
     assert e.value.code == "owner_auth_unavailable"
     assert f.view.agents() == [] and f.view.policy.max_agents == 16                              # oxu işləyir, yazı yoxdur
-
-
-def test_authority_is_built_from_the_server_env_only_and_never_leaks():
-    assert build_principal_authority({}) is None and build_principal_authority({"NAYMERA_FACTORY_AUTH_KEY": "qısa"}) is None
-    auth = build_principal_authority({"NAYMERA_FACTORY_AUTH_KEY": "k" * 40})
-    assert isinstance(auth, PrincipalAuthority) and "k" * 8 not in repr(auth) and auth.verify(auth.owner("owner"))
-    with pytest.raises(TypeError):
-        pickle.dumps(auth)
-    with pytest.raises(ValueError):
-        PrincipalAuthority(b"short")
-    assert "k" * 8 not in repr(auth.owner("owner")) and auth.owner("owner").proof not in repr(auth.owner("owner"))
 
 
 def test_factory_no_longer_exposes_a_system_principal(world):
@@ -135,12 +123,13 @@ def test_results_cannot_be_submitted_without_task_bound_dispatcher_authorization
         h.submit_result(t.task_id, "uydurma nəticə")
     assert e.value.code == "dispatch_authorization_required"
     claimed = w.factory.runtime.claim(t.task_id, DISPATCHER)
-    real = claimed.authorization
-    forged = DispatchAuthorization(t.task_id, a.agent_id, claimed.task.run_op, claimed.task.attempts, "0" * 64)
+    real = w.trust.dispatcher.authorize(claimed.task_id, claimed.agent_id, claimed.run_op, claimed.op_id, claimed.attempts, "submit_result")
+    forged = dataclasses.replace(real, signature="A" * 86)
     for bad, code in ((None, "dispatch_authorization_required"), (forged, "dispatch_authorization_invalid"),
-                      (dataclasses.replace(real, token=""), "dispatch_authorization_required"),
+                      (dataclasses.replace(real, signature=""), "dispatch_authorization_invalid"),
                       (dataclasses.replace(real, attempt=real.attempt + 1), "dispatch_authorization_invalid"),
                       (dataclasses.replace(real, run_op="x:a9"), "dispatch_authorization_invalid"),
+                      (dataclasses.replace(real, action="fail"), "dispatch_authorization_invalid"),
                       ("token", "dispatch_authorization_required")):
         with pytest.raises(FactoryDenied) as e:
             h.submit_result(t.task_id, "uydurma nəticə", authorization=bad)
@@ -159,17 +148,17 @@ def test_authorization_is_bound_to_its_own_task_and_attempt(world):
     t2 = w.factory.control.assign(a.agent_id, "iki", "iş iki", SYSTEM)
     c1 = w.factory.runtime.claim(t1.task_id, DISPATCHER)
     c2 = w.factory.runtime.claim(t2.task_id, DISPATCHER)
+    mint = lambda c, action: w.trust.dispatcher.authorize(c.task_id, c.agent_id, c.run_op, c.op_id, c.attempts, action)   # noqa: E731
     with pytest.raises(FactoryDenied) as e:                                      # t1 səlahiyyəti ilə t2 nəticəsi
-        w.factory.handle(a.agent_id).submit_result(t2.task_id, "qarışdırma", authorization=c1.authorization)
+        w.factory.handle(a.agent_id).submit_result(t2.task_id, "qarışdırma", authorization=mint(c1, "submit_result"))
     assert e.value.code == "dispatch_authorization_invalid"
-    # köhnə cəhd: retry ilə run_op sıfırlanır, köhnə səlahiyyət keçmir
-    w.factory.runtime.fail(c2.authorization, "müvəqqəti", retry=True)
+    stale = mint(c2, "submit_result")
+    w.factory.runtime.fail(mint(c2, "fail"), "müvəqqəti", retry=True)           # retry: run_op sıfırlanır
     c2b = w.factory.runtime.claim(t2.task_id, DISPATCHER)
     with pytest.raises(FactoryDenied) as e:
-        w.factory.handle(a.agent_id).submit_result(t2.task_id, "köhnə", authorization=c2.authorization)
+        w.factory.handle(a.agent_id).submit_result(t2.task_id, "köhnə", authorization=stale)
     assert e.value.code == "dispatch_authorization_invalid"
-    assert w.factory.handle(a.agent_id).submit_result(t2.task_id, "yeni", authorization=c2b.authorization).summary == "yeni"
-    # icra vəziyyəti dəyişiklikləri də səlahiyyətsiz mümkün deyil
+    assert w.factory.handle(a.agent_id).submit_result(t2.task_id, "yeni", authorization=mint(c2b, "submit_result")).summary == "yeni"
     for fn in (lambda: w.factory.runtime.fail(None, "x"), lambda: w.factory.runtime.await_approval(forged_auth(t1), "apr_1"),
                lambda: w.factory.runtime.note_success(forged_auth(t1))):
         with pytest.raises(FactoryDenied):
@@ -178,13 +167,14 @@ def test_authorization_is_bound_to_its_own_task_and_attempt(world):
 
 
 def forged_auth(t):
-    return DispatchAuthorization(t.task_id, t.agent_id, "", 0, "f" * 64)
+    return DispatchAuthorization(t.task_id, t.agent_id, "", t.op_id, 0, "fail", "test-key-1", T0, T0 + 60, "n" * 24, "A" * 86)
 
 
 def test_dispatcher_with_a_forged_identity_cannot_run_anything(world):
     w = world
     a, t = task(w)
-    bad = AgentDispatcher(w.factory, w.orch, w.runner, principal=FORGED_DISPATCHER, approvals=w.approvals.reader)
+    foreign = TrustedSigner("test-key-1", __import__("secrets").token_bytes(32), clock=w.clock)       # başqa açar
+    bad = AgentDispatcher(w.factory, w.orch, w.runner, issuer=foreign.dispatcher_issuer(), system=foreign.system_issuer(), approvals=w.approvals.reader)
     with pytest.raises(FactoryDenied) as e:
         bad.execute(t.task_id)
     assert e.value.code == "forged_principal" and w.cloud.calls == 0 and w.factory.view.task(t.task_id).state == "queued"
@@ -240,7 +230,7 @@ def test_runner_rejects_any_mismatch_between_approved_input_and_stored_task(worl
     w = world
     a, t = task(w, prompt="əsl mətn")
     claimed = w.factory.runtime.claim(t.task_id, DISPATCHER)
-    good = approval_input(a, claimed.task)
+    good = approval_input(a, claimed)
     spec = w.reg.list(a.department)[0].spec
     spec = next(x.spec for x in w.reg.list(a.department) if x.spec.name == a.name)
     for key, value in (("sorgu", "dəyişdirilmiş mətn"), ("prompt_sha256", "0" * 64), ("agent_id", "agt_other"), ("kind", "review"),
@@ -259,7 +249,7 @@ def test_runner_uses_the_approved_input_not_a_fresh_database_read(world):
     a, t = task(w, prompt="əsl mətn")
     claimed = w.factory.runtime.claim(t.task_id, DISPATCHER)
     spec = next(x.spec for x in w.reg.list(a.department) if x.spec.name == a.name)
-    good = approval_input(a, claimed.task)
+    good = approval_input(a, claimed)
     w.factory._core.conn.execute("UPDATE factory_tasks SET prompt = 'icra zamanı dəyişdi' WHERE task_id = ?", (t.task_id,))
     with pytest.raises(ExecutionError):                                                   # icradan dərhal əvvəl yenidən yoxlama
         w.runner(spec, good)

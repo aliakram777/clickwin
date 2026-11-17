@@ -16,7 +16,7 @@ from agents.orchestrator import Orchestrator
 from agents.registry import Registry
 from safety.approvals import ApprovalService, Principal
 from safety.ledger import CostLedger, reconcile
-from tests.factory_keys import AUTH, DISPATCHER, OWNER, SYSTEM
+from tests.factory_keys import DISPATCHER, OWNER, SYSTEM, trust
 from tests.test_hybrid_router import Clock, Fake
 
 LEAK = "sk-test-" + "FAKEKEY1234567890abcdef"
@@ -31,8 +31,9 @@ def world(tmp_path, monkeypatch):
     clock = Clock()
     audit, stop = tmp_path / "audit.jsonl", tmp_path / "STOP"
     reg = Registry(":memory:")
-    company = Company(reg, tmp_path / "company.db", audit, owners={"owner"}, clock=clock)
-    factory = AgentFactory(company, tmp_path / "factory.db", audit, tmp_path / "ws", owners={"owner"}, clock=clock, authority=AUTH)
+    tr = trust(clock)
+    company = Company(reg, tmp_path / "company.db", audit, owners={"owner"}, clock=clock, verifier=tr.ring)
+    factory = AgentFactory(company, tmp_path / "factory.db", audit, tmp_path / "ws", owners={"owner"}, clock=clock, verifier=tr.ring)
     store = AiStore(tmp_path / "ai.db", clock=clock)
     cloud, local = Fake("cloud", script=["Bulud cavabı: hazırdır"]), Fake("local", state="not_configured")
     store.set_mode(Mode.AUTO, "owner")
@@ -42,14 +43,14 @@ def world(tmp_path, monkeypatch):
     runner = AgentLLMRunner(factory, router, global_limit=lambda: 5.0)
     orch = Orchestrator(reg, runner, audit_path=audit, stop_path=stop, errors_path=tmp_path / "e.jsonl", ledger=ledger,
                         approvals=approvals.client, policy=company.view.budget_policy(global_limit=5.0))
-    disp = AgentDispatcher(factory, orch, runner, principal=DISPATCHER, approvals=approvals.reader)
+    disp = AgentDispatcher(factory, orch, runner, issuer=tr.dispatcher, system=tr.system, approvals=approvals.reader)
 
     class W:
         pass
 
     w = W()
     w.__dict__.update(clock=clock, audit=audit, stop=stop, reg=reg, company=company, factory=factory, store=store, router=router, cloud=cloud,
-                      local=local, approvals=approvals, ledger=ledger, runner=runner, orch=orch, disp=disp, tmp=tmp_path)
+                      local=local, approvals=approvals, ledger=ledger, runner=runner, orch=orch, disp=disp, tmp=tmp_path, trust=tr)
     return w
 
 
