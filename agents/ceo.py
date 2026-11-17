@@ -52,6 +52,7 @@ class StepReport:
     attempts: int = 1
     op_id: str = ""  # son cəhdin op_id-si
     needs_reconciliation: bool = False  # xərc naməlum: rezerv əl ilə uzlaşdırılmalıdır
+    approval_id: str = ""  # pending_approval: sahibin təsdiqini gözləyən sorğu
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,10 @@ class JobReport:
         return [s for s in self.steps if s.needs_reconciliation]
 
     @property
+    def pending_approvals(self) -> list[StepReport]:
+        return [s for s in self.steps if s.status == "pending_approval"]
+
+    @property
     def outputs(self) -> dict[str, Any]:
         return {s.department: s.output for s in self.steps if s.status == "ok"}
 
@@ -87,6 +92,8 @@ class JobReport:
         ]
         lines += [f"! əl ilə uzlaşdırma lazımdır: {s.op_id} (xərc naməlum, rezerv saxlanılır)"
                   for s in self.needs_reconciliation]
+        lines += [f"? sahibin təsdiqi gözlənilir: {s.approval_id} ({s.department})"
+                  for s in self.pending_approvals]
         return "\n".join(lines)
 
 
@@ -138,7 +145,8 @@ class CEO:
         task = self._task(goal, step, op_id, f"ceo:{step.department}:{goal[:60]}")
         result = self.orchestrator.execute(task)  # gate burada işləyir
         if result.status != "ok":
-            return StepReport(step.department, result.status, result.agent, reason=result.reason)
+            return StepReport(step.department, result.status, result.agent, reason=result.reason,
+                              approval_id=result.approval_id)
         return self._verify(step, result)
 
     def _task(self, goal: str, step: Rule | PlanStep, op_id: str, description: str) -> Task:
@@ -213,7 +221,7 @@ class CEO:
         reason = result.reason + (" — naməlum xərc: əl ilə uzlaşdırma lazımdır" if unknown else "")
         return StepReport(step.department, result.status, result.agent, reason=reason,
                           step_id=step.id, attempts=attempt + 1, op_id=op_id,
-                          needs_reconciliation=unknown)
+                          needs_reconciliation=unknown, approval_id=result.approval_id)
 
     def _verify(self, step: Rule, result: ExecutionResult) -> StepReport:
         check = self.checks.get(step.department)

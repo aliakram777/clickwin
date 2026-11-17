@@ -241,6 +241,8 @@ def reconcile(ledger: CostLedger, audit_path: str | Path) -> ReconcileReport:
                 continue
             try:
                 row = json.loads(line)
+                if "event" in row:  # təsdiq xidmətinin hadisələri (qərar sətri deyil)
+                    continue
                 if row["allowed"] is True:
                     cost = row["cost"]
                     if isinstance(cost, bool) or not isinstance(cost, (int, float)):
