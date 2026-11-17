@@ -42,6 +42,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import az.naymera.app.data.NotConfiguredLocal
 import az.naymera.app.data.ApiClient
 import az.naymera.app.data.EventSync
 import az.naymera.app.data.SessionStore
@@ -89,8 +90,9 @@ private fun Main(store: SessionStore, api: ApiClient, onLoggedOut: () -> Unit) {
     val nav = rememberNavController()
     val sync = remember { EventSync(api, store) }
     val speech = remember { MockSpeech() } // real səs qoşulana qədər SİMULYASİYA
-    val chatVm: ChatViewModel = viewModel(factory = viewModelFactory { initializer { ChatViewModel(api, speech) } })
+    val onDevice = remember { NotConfiguredLocal } // cihazdakı Local AI: model qurulmayıb (NOT CONFIGURED)
     val mainVm: MainViewModel = viewModel(factory = viewModelFactory { initializer { MainViewModel(api, sync) } })
+    val chatVm: ChatViewModel = viewModel(factory = viewModelFactory { initializer { ChatViewModel(api, speech, onDevice) { mainVm.currentMode } } })
     val tabs = listOf(
         Tab("home", R.string.tab_home, Icons.Filled.Home),
         Tab("chat", R.string.tab_chat, Icons.Filled.Chat),
@@ -114,7 +116,7 @@ private fun Main(store: SessionStore, api: ApiClient, onLoggedOut: () -> Unit) {
         NavHost(nav, startDestination = "home", modifier = Modifier.padding(pad)) {
             composable("home") {
                 Column {
-                    HomeScreen(mainVm, Modifier.weight(1f))
+                    HomeScreen(mainVm, onDevice, Modifier.weight(1f))
                     Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = { nav.navigate("history") }) { Text(stringResource(R.string.tab_history)) }
                         TextButton(onClick = { nav.navigate("settings") }) { Text(stringResource(R.string.tab_settings)) }

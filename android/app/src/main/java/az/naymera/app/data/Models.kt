@@ -37,6 +37,7 @@ data class TokenResponse(
 data class ChatRequest(
     @SerialName("text") val text: String,
     @SerialName("conversation_id") val conversationId: String? = null,
+    @SerialName("client_request_id") val clientRequestId: String? = null,
 )
 
 @Serializable
@@ -51,6 +52,9 @@ data class ChatMessage(
     @SerialName("speech_text") val speechText: String = "",
     @SerialName("provenance") val provenance: String = "",
     @SerialName("is_mock") val isMock: Boolean = false,
+    @SerialName("engine") val engine: String = "",
+    @SerialName("notice") val notice: String = "",
+    @SerialName("notice_code") val noticeCode: String = "",
 )
 
 @Serializable

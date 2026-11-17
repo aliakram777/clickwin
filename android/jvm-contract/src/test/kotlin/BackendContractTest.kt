@@ -175,4 +175,36 @@ class BackendContractTest {
         assertEquals(ApiFailure.Unauthorized, failure { api.conversations() }.failure)
         assertEquals(ApiFailure.Unauthorized, failure { api.approvals() }.failure)
     }
+
+    @Test fun aiStatusModesAndHonestChatNotices() {
+        val (api, _, _) = pairedClient()
+        val st = runBlocking { api.aiStatus() }
+        assertEquals("auto", st.mode)
+        assertEquals("simulation", st.cloud.state); assertTrue(st.cloud.isMock)
+        assertEquals("not_configured", st.local.state)
+        assertEquals(setOf("cloud_paid_use", "cloud_data_transfer", "local_model_download", "local_resource_use"), st.consents.keys)
+        assertTrue(st.consents.values.all { !it })
+        assertEquals("simulation", st.voice.tts["local"]); assertEquals("not_configured", st.voice.stt["local"])
+        assertEquals(az.naymera.app.data.EngineBadge.Simulation, st.cloud.badge())
+        assertEquals(az.naymera.app.data.EngineBadge.NotConfigured, st.local.badge())
+        // rejimlər dəyişir və davamlıdır
+        assertEquals("local", runBlocking { api.setAiMode(az.naymera.app.data.AiMode.Local) }.mode)
+        assertEquals("local", runBlocking { api.aiStatus() }.mode)
+        val localChat = runBlocking { api.sendMessage("salam", null, null) }.assistantMessage
+        assertEquals("local_unavailable", localChat.noticeCode)        // Local model yoxdur: real imkan kimi göstərilmir, Cloud-a keçilmir
+        assertEquals("", localChat.engine)
+        runBlocking { api.setAiMode(az.naymera.app.data.AiMode.Cloud) }
+        assertEquals("simulation_only", runBlocking { api.sendMessage("salam", null, null) }.assistantMessage.noticeCode)
+        runBlocking { api.setAiMode(az.naymera.app.data.AiMode.Auto) }
+    }
+
+    @Test fun clientRequestIdMakesChatRetriesIdempotent() {
+        val (api, _, _) = pairedClient()
+        val id = "jvm-" + System.nanoTime()
+        val first = runBlocking { api.sendMessage("təkrar sınağı", null, id) }
+        val again = runBlocking { api.sendMessage("təkrar sınağı", null, id) }
+        assertEquals(first.assistantMessage.id, again.assistantMessage.id)
+        assertEquals(2, runBlocking { api.messages(first.conversationId) }.size)
+        assertEquals(409, failure { api.sendMessage("başqa mətn", null, id) }.status)
+    }
 }

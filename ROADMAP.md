@@ -1,6 +1,6 @@
 # NAYMERA — Məhsul yol xəritəsi
 
-Tarix: 2026-11-17 · Əsas: `claude/stage12-research-intelligence` (mərhələ 1–12; Mərhələ 13–15 üzərində işlənir; PR #1–#12 zəncirvari açıqdır, birləşdirilməyib).
+Tarix: 2026-11-17 · Əsas: `claude/stage12-research-intelligence` (mərhələ 1–12; Mərhələ 13–16 üzərində işlənir; PR #1–#12 zəncirvari açıqdır, birləşdirilməyib).
 
 Bu sənəd plandır, vədi yox. Gəlir, qazanc və ya gəlirli nəticə haqqında heç bir iddia yoxdur; trading itkiyə səbəb ola bilər
 (bax: bölmə 6).
@@ -212,3 +212,8 @@ Android (səs/mətn) → tapşırıq qəbulu → spesifikasiya və plan (LLM TƏ
 - **APK build edilmədi**: `dl.google.com` bloklu, Android SDK yoxdur (mühit dəyişikliyi təklifi sahib tərəfindən rədd edildi). Maneə, tələb olunan versiyalar və yerli addımlar `android/BUILD_STATUS.md`-dədir; imzalama/yayımlama qurulmayıb.
 - Audit (`android/AUDIT.md`), JVM kontrakt layihəsi (Android-dan asılı olmayan Kotlin qatı həqiqətən kompilyasiya olundu, həqiqi backend ilə 27 test keçdi), telefon sınağı planı (`android/DEVICE_TEST.md`).
 - Növbəti: sahibin maşınında `assembleDebug` və `DEVICE_TEST.md` sınağı; sonra real səs, FCM, real LLM/agent icraçısı və imzalama (hamısı sahib qərarı).
+
+## Mərhələ 16 — Daimi hibrid AI beyni (status)
+- Cloud və Local mühərrikləri ortaq interfeysdə, AUTO/CLOUD/LOCAL, təhlükəsiz fallback, təkrar icranın qarşısı, razılıq və məxfilik, ortaq oxu-yaddaş — **hazırdır və testlənib (927 Python testi, 34 Kotlin JVM testi)**; ətraflı `HYBRID_AI.md`.
+- Real Cloud provayderi, real lokal model və real səs **yoxdur** (simulation/not_configured). APK build edilməyib; Android UI kodu cihazda sınanmayıb.
+- Növbəti (hamısı sahib qərarı/razılığı ilə): Cloud provayderi adapteri (açar yalnız serverin env-ində, ödənişli istifadədən əvvəl razılıq), lokal modelin ölçülməsi (az/tr/ru keyfiyyəti) və cihaz/server runtime-ı, real səs, Android razılıq ekranı.

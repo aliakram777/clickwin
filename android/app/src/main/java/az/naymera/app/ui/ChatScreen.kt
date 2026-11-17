@@ -113,12 +113,23 @@ private fun Bubble(m: ChatMessage) {
                     m.text,
                     color = if (mine) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
                 )
-                if (!mine && m.isMock) {
+                if (!mine) {
+                    // Hansı mühərrik cavab verdi (Cloud/Local/Cihaz/Qayda) və simulyasiya olub-olmadığı açıq göstərilir.
                     Text(
-                        stringResource(R.string.chat_assistant_mock),
+                        stringResource(engineRes(m.engine, m.provenance)),
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.secondary,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (m.isMock) {
+                        Text(
+                            stringResource(R.string.chat_assistant_mock),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.secondary,
+                        )
+                    }
+                    noticeRes(m.noticeCode)?.let {
+                        Text(stringResource(it), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                    }
                 }
             }
         }
