@@ -838,9 +838,8 @@ def _handoff(k: _Core, agent_id: str, to_agent_id: str, title: str, payload: dic
 
 
 class AgentHandle:
-    """Agentin ÖZ əməliyyatları: nəticə təqdim etmək (yalnız dispetçer səlahiyyəti ilə), tapşırıq ötürmək, icazə SORĞUSU yazmaq.
-    Obyekt nüvəyə, icra fasadına və ya imza obyektinə atribut kimi istinad etmir (yalnız dörd dar funksiya); nüvənin özündə də imtiyazlı fasad,
-    şəxsi açar və səlahiyyət verən obyekt YOXDUR (nüvə yalnız oxu üzünü və açıq açarları saxlayır)."""
+    """ETİBARLI TƏRƏF daxili portu (agent koduna VERİLMİR): yalnız `AgentGateway` (`runtime/agent_gateway.py`) onu çağırır. Bu SƏRHƏD DEYİL: bağlanışlar (`__closure__`) vasitəsilə
+    nüvəyə, DB bağlantılarına və reyestrə çatmaq mümkündür (audit B-1). Agent kodu yalnız AYRI proses + RPC ilə işləyir; bu sinif proses-daxili gizlətmə vəd etmir."""
     __slots__ = ("agent_id", "info", "request_permission", "submit_result", "handoff")
 
     def __init__(self, core: _Core, agent_id: str) -> None:
@@ -958,4 +957,5 @@ class AgentFactory:
         self.runtime = FactoryRuntime(self._core)
 
     def handle(self, agent_id: str) -> AgentHandle:
+        """YALNIZ etibarlı server kodu üçün (məs. `AgentGateway`). Agent koduna, plaginə və ya LLM-ə heç vaxt verilmir; `FactoryStack` bunu paylamır."""
         return AgentHandle(self._core, agent_id)

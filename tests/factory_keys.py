@@ -22,17 +22,24 @@ KEY_ID = "test-key-1"
 SIGNER = TrustedSigner(KEY_ID, SEED, clock=lambda: T0)           # sabit T0 vaxtında imzalayır: modul-səviyyəli sabit şəxsiyyətlər üçün
 
 
-def ring(clock) -> Keyring:
-    """Yalnız yoxlama (açıq açar)."""
+def ring_with_control(clock):
+    """(yalnız yoxlama Keyring, KeyringControl): control-plane yalnız testin özündədir."""
     r = Keyring(clock)
-    r.add_public_key(KEY_ID, SIGNER.public_key)
-    return r
+    control = r.take_control()
+    control.add_public_key(KEY_ID, SIGNER.public_key)
+    return r, control
+
+
+def ring(clock) -> Keyring:
+    """Yalnız yoxlama (açıq açar); control götürülüb və atılıb (açar əlavə/ləğv/dondurma mümkün deyil)."""
+    return ring_with_control(clock)[0]
 
 
 def trust(clock) -> SimpleNamespace:
     """Bir test üçün etibar çıpası: `ring` (yoxlama) + test saatına bağlı rola xas imza obyektləri."""
     signer = TrustedSigner(KEY_ID, SEED, clock=clock)
-    return SimpleNamespace(signer=signer, ring=ring(clock), dispatcher=signer.dispatcher_issuer(), system=signer.system_issuer(),
+    r, control = ring_with_control(clock)
+    return SimpleNamespace(signer=signer, ring=r, control=control, dispatcher=signer.dispatcher_issuer(), system=signer.system_issuer(),
                            owner=signer.owner_issuer(lambda r: ("owner", "dev1")))
 
 

@@ -164,36 +164,58 @@ def decode_public_key(text: Any) -> bytes:
 # --- yalnız yoxlama ---
 
 class Keyring:
-    """Yalnız YOXLAMA: açıq açarlar, açar/etibarnamə ləğvi, vaxt yoxlaması. Heç bir şəxsi açar və ya imza imkanı yoxdur."""
+    """Yalnız YOXLAMA (ictimai səth): `check_principal`, `check_authorization`, `key_ids`, `frozen`. Açıq açar əlavə etmək, açar/etibarnamə ləğvi və dondurma bu
+    obyektdə YOXDUR: onlar yalnız `take_control()` ilə BİR dəfə alınan `KeyringControl`-dadır (etibarlı bootstrap/control-plane). Nüvədə/Company-də/yoxlayıcıda
+    yalnız bu yoxlama üzü saxlanır. Qeyd: bu proses-daxili ayrılıqdır; agent kodu AYRI prosesdə işləməlidir (`runtime/agent_gateway.py`)."""
 
     def __init__(self, clock: Callable[[], float] = time.time) -> None:
         self._clock = clock
         self._keys: dict[str, Ed25519PublicKey] = {}
         self._revoked_keys: set[str] = set()
         self._revoked_nonces: set[str] = set()
+        self._frozen = False
+        self._control_taken = False
         self._lock = threading.Lock()
 
     def __repr__(self) -> str:
-        return f"Keyring(keys={sorted(self._keys)}, revoked={sorted(self._revoked_keys)})"
+        return f"Keyring(keys={sorted(self._keys)}, revoked={sorted(self._revoked_keys)}, frozen={self._frozen})"
 
-    def add_public_key(self, key_id: str, public: bytes | str) -> None:
+    @property
+    def frozen(self) -> bool:
+        return self._frozen
+
+    def take_control(self) -> "KeyringControl":
+        """Control-plane tutacağı YALNIZ BİR dəfə verilir (bootstrap qurulan kimi alır); sonrakı çağırışlar rədd edilir."""
+        with self._lock:
+            if self._control_taken:
+                raise CredentialError("keyring idarəsi artıq götürülüb", "keyring_control_taken")
+            self._control_taken = True
+        return KeyringControl(self)
+
+    def _add(self, key_id: str, public: bytes | str) -> None:
         if not isinstance(key_id, str) or not _KEY_ID_RE.match(key_id):
             raise CredentialError("açar id yanlışdır", "bad_key")
         raw = decode_public_key(public) if isinstance(public, str) else bytes(public)
         if len(raw) != 32:
             raise CredentialError("açıq açar 32 bayt olmalıdır", "bad_key")
         with self._lock:
+            if self._frozen:
+                raise CredentialError("etibarlı açar konfiqurasiyası dondurulub: yeni açar əlavə/dəyişdirmək olmaz", "keyring_frozen")
             if key_id in self._keys:
                 raise CredentialError("açar id artıq mövcuddur", "bad_key")
             self._keys[key_id] = Ed25519PublicKey.from_public_bytes(raw)
 
-    def revoke_key(self, key_id: str) -> None:
+    def _revoke_key(self, key_id: str) -> None:
         with self._lock:
             self._revoked_keys.add(str(key_id))
 
-    def revoke_credential(self, nonce: str) -> None:
+    def _revoke_credential(self, nonce: str) -> None:
         with self._lock:
             self._revoked_nonces.add(str(nonce))
+
+    def _freeze(self) -> None:
+        with self._lock:
+            self._frozen = True
 
     def key_ids(self) -> tuple[str, ...]:
         with self._lock:
@@ -241,6 +263,30 @@ class Keyring:
                 or isinstance(auth.attempt, bool) or not isinstance(auth.attempt, int):
             raise CredentialError("səlahiyyət yanlış formatdadır", "forged_principal")
         self._check(_authorization_bytes(auth), auth.signature, auth.key_id, auth.nonce, auth.issued_at, auth.expires_at, MAX_AUTH_TTL)
+
+
+class KeyringControl:
+    """Etibarlı control-plane: açıq açar əlavə etmək (dondurulmamışdan əvvəl), dondurmaq və açar/etibarnamə ləğv etmək. Yalnız `Keyring.take_control()` verir."""
+    __slots__ = ("_ring",)
+
+    def __init__(self, ring: Keyring) -> None:
+        object.__setattr__(self, "_ring", ring)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("dəyişdirilə bilməz")
+
+    def add_public_key(self, key_id: str, public: bytes | str) -> None:
+        self._ring._add(key_id, public)
+
+    def freeze(self) -> None:
+        """Bootstrap-dan sonra etibarlı açar çoxluğu geri qaytarılmaz şəkildə dondurulur. Ləğv (daraltma) dondurulmadan sonra da mümkündür."""
+        self._ring._freeze()
+
+    def revoke_key(self, key_id: str) -> None:
+        self._ring._revoke_key(key_id)
+
+    def revoke_credential(self, nonce: str) -> None:
+        self._ring._revoke_credential(nonce)
 
 
 # --- imza verən tərəf (YALNIZ etibarlı bootstrap) ---
@@ -358,7 +404,7 @@ class TrustedSigner:
     def verifier(self) -> Keyring:
         """Yalnız bu açarın açıq hissəsini tanıyan YOXLAMA obyekti (şəxsi açar yoxdur)."""
         ring = Keyring(self._clock)
-        ring.add_public_key(self.key_id, self.public_key)
+        ring._add(self.key_id, self.public_key)
         return ring
 
     def system_issuer(self, system_id: str = "naymera", channel: str = "core", ttl: float = DEFAULT_SYSTEM_TTL) -> SystemIssuer:
