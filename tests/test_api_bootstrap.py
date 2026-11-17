@@ -98,3 +98,12 @@ def test_ai_settings_persist_across_restarts(tmp_path):
     assert wsgi(svc.app, "POST", "/v1/ai/mode", {"mode": "local"}, token=tok)[0] == 200
     again = build_app(tmp_path)
     assert wsgi(again.app, "GET", "/v1/ai/status", token=tok)[1]["mode"] == "local"
+
+
+def test_build_app_accepts_externally_built_engines_and_reports_their_honest_state(tmp_path):
+    from agents.hybrid import CloudEngine, LocalEngine
+    svc = build_app(tmp_path, cloud_engine=CloudEngine(None), local_engine=LocalEngine(None))
+    tok = wsgi(svc.app, "POST", "/v1/pair", pair_body(svc.auth.create_pairing_code()))[1]["access_token"]
+    st = wsgi(svc.app, "GET", "/v1/ai/status", token=tok)[1]
+    assert st["cloud"]["state"] == "not_configured" and st["local"]["state"] == "not_configured" and st["active"] == "none"
+    assert wsgi(svc.app, "GET", "/v1/system/status", token=tok)[1]["llm_is_mock"] is True

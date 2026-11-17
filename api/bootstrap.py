@@ -44,7 +44,7 @@ class Services:
 
 
 def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: float = 0.0,
-              https: bool = False) -> Services:
+              https: bool = False, cloud_engine: Any = None, local_engine: Any = None) -> Services:
     d = Path(data_dir)
     d.mkdir(parents=True, exist_ok=True)
     audit, stop = d / "audit.jsonl", d / "STOP"
@@ -66,7 +66,8 @@ def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: fl
     llm = GuardedLLM(MockProvider(default="Mock cavab: real LLM qoşulmayıb."), LLMConfig(provider="mock"),
                      log_path=d / "llm.jsonl", stop_path=stop)
     # Hibrid AI: Cloud (burada MOCK: real provayder/açar qoşulmayıb) və Local (model yoxdur: NOT CONFIGURED). Rejim: AUTO.
-    router = HybridRouter(CloudEngine(llm), LocalEngine(None), AiStore(d / "ai.db"), stop_path=stop)
+    router = HybridRouter(cloud_engine if cloud_engine is not None else CloudEngine(llm),
+                          local_engine if local_engine is not None else LocalEngine(None), AiStore(d / "ai.db"), stop_path=stop)
     jobs = JobService(LLMPlanner(RoutedLLM(router), company.view.department_costs()), durable, d / "jobs.db")
     rules = RuleAssistant(lambda: {"pending_approvals": len(approvals.reader.pending())})
     chat = ChatService(ConversationStore(d / "chat.db"), HybridReplyEngine(
