@@ -121,15 +121,20 @@ class CostLedger:
         agent_limit: float | None = None,
         global_limit: float | None = None,
         task_limit: float | None = None,
+        group_prefix: str | None = None,
+        group_limit: float | None = None,
         description: str = "",
     ) -> Reservation:
-        """Limitləri yoxlayıb rezervi atomik tutur. Azad edilmiş `op_id` yenidən rezerv edilə bilər."""
+        """Limitləri yoxlayıb rezervi atomik tutur. Azad edilmiş `op_id` yenidən rezerv edilə bilər.
+        `group_prefix` + `group_limit`: eyni prefiksli `op_id`-lərin (məs. `llm:`) ümumi xərc tavanı (agentdən asılı olmayaraq, eyni tranzaksiyada)."""
         _check_text("op_id", op_id)
         _check_text("agent", agent)
         _check_amount("məbləğ", amount)
         for name, value in (("agent_limit", agent_limit), ("global_limit", global_limit),
-                            ("task_limit", task_limit)):
+                            ("task_limit", task_limit), ("group_limit", group_limit)):
             _check_limit(name, value)
+        if group_limit is not None:
+            _check_text("group_prefix", group_prefix)
         amount = float(amount)
         with self._tx():
             row = self._conn.execute("SELECT status FROM costs WHERE op_id = ?", (op_id,)).fetchone()
@@ -142,6 +147,13 @@ class CostLedger:
                 if used + amount > agent_limit + _EPS:
                     return Reservation(
                         "denied", f"agent xərc limiti aşılır: {used + amount:.4f} > {agent_limit:.4f}")
+            if group_limit is not None and group_prefix and op_id.startswith(group_prefix):
+                used = float(self._conn.execute(
+                    "SELECT COALESCE(SUM(amount), 0.0) FROM costs WHERE substr(op_id, 1, ?) = ?",
+                    (len(group_prefix), group_prefix)).fetchone()[0])
+                if used + amount > group_limit + _EPS:
+                    return Reservation(
+                        "denied", f"qrup xərc limiti aşılır: {used + amount:.4f} > {group_limit:.4f}")
             if global_limit is not None:
                 used = self.total()
                 if used + amount > global_limit + _EPS:

@@ -94,6 +94,8 @@ Mərhələ 17 — Real AI runtime və avtonom agent fabrikası (məhdud agent ya
 - Testlər: **Python/pytest 1077 keçdi + 1 opt-in atlandı** (927 köhnə qorunub; yeni: provayder/runtime 47, agent fabriki 26, agent icrası 22, komanda 26, builders 19, şirkət suspend 7, orkestrator hədəfləmə 2, bootstrap 1). Android/Kotlin bu mərhələdə dəyişməyib (JVM kontrakt yenidən işlədilməyib); **Android Gradle build/test icra olunmayıb**.
 - **Mərhələ 17 məhdudiyyətləri:** real provayder/model/alət/nəşr YOXDUR (agentlər yalnız mətn qaralaması istehsal edir); real OpenAI-uyğun serverlə uyğunluq sınanmayıb; Website/App/APK/Video builder-lər qurulmayıb; icra qatı saxlancıları tək-iplik bağlıdır (paralel yalnız AI generasiyası); rol/plan heuristikası sadədir; API/Android-da agent idarəetmə ekranı yoxdur; APK build edilməyib (Android SDK yoxdur).
 
+- Mərhələ 17 / təhlükəsizlik möhkəmləndirməsi (audit F-1, F-2, F-3) — imzalanmış sahib/sistem/dispetçer şəxsiyyəti (`agents/factory_auth.py`; açar yalnız server mühitində, yoxdursa imtiyazlı əməliyyatlar bağlı), tapşırığa bağlı `DispatchAuthorization` olmadan nəticə yazılmır; təsdiq edilən giriş = icra olunan giriş (icradan əvvəl hash yoxlaması, replay/mutasiya rədd); LLM xərci hər sorğudan əvvəl Ledger-də agentin adına rezerv edilir, 0 büdcəli agent ödənişli Cloud-u işlətmir, hesablaşma uğursuzluğu qapalı qalır. Regressiya testləri: `tests/test_factory_hardening.py`. Qalan risklər: `AGENT_FACTORY.md` → Məhdudiyyətlər. Real Cloud ilə sınaq aparılmayıb; APK build edilməyib.
+
 ## Növbəti addımlar (təsdiq gözləyir)
 - LLM əsaslı Planner (interfeys hazırdır, real API təsdiq tələb edir)
 - Asılılıq çıxışlarının növbəti addıma ötürülməsi, retry gözləməsi (backoff)

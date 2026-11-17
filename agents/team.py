@@ -28,6 +28,7 @@ from typing import Any, Callable, Sequence
 from agents.agent_factory import AgentFactory, AgentRecord, FactoryDenied, validate_exchange
 from agents.agent_roles import ROLE_CATALOG
 from agents.agent_runtime import AgentDispatcher
+from agents.factory_auth import SignedPrincipal
 from agents.hybrid import HybridRouter
 from agents.memory import detect_secrets
 from agents.spec import KNOWN_PERMISSIONS
@@ -289,8 +290,9 @@ def _report_from_json(raw: str) -> TeamReport:
 
 class TeamRunner:
     def __init__(self, factory: AgentFactory, dispatcher: AgentDispatcher, db_path: str | Path, audit_path: str | Path, *,
-                 clock: Callable[[], float] = time.time, max_reassign: int = 1) -> None:
-        self.factory, self.dispatcher, self.clock, self.max_reassign = factory, dispatcher, clock, max_reassign
+                 system: SignedPrincipal, clock: Callable[[], float] = time.time, max_reassign: int = 1) -> None:
+        """`system`: `PrincipalAuthority.system()` ilə imzalanmış NAYMERA şəxsiyyəti (fabrik artıq öz `system` şəxsiyyətini açmır; saxta şəxsiyyət rədd olunur)."""
+        self.factory, self.dispatcher, self.clock, self.max_reassign, self.system = factory, dispatcher, clock, max_reassign, system
         self.audit_path = Path(audit_path)
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -399,7 +401,7 @@ class TeamRunner:
         if exclude:                            # əvəzetmədə yeni agent yaradılmır (agent çoxalması və uğursuzluğun gizlədilməsi olmasın)
             return "no_replacement_agent"
         try:
-            return self.factory.control.spawn(stage.role_id, self.factory.system)
+            return self.factory.control.spawn(stage.role_id, self.system)
         except FactoryDenied as exc:
             return f"spawn_denied: {exc.code}"
 
@@ -428,7 +430,7 @@ class TeamRunner:
             return None
         op_id = f"{plan.plan_id}:{stage.id}" + (f":r{attempt}" if attempt else "")
         try:
-            t = self.factory.control.assign(picked.agent_id, stage.title, self._compose(plan, stage, reports), self.factory.system, kind=stage.kind,
+            t = self.factory.control.assign(picked.agent_id, stage.title, self._compose(plan, stage, reports), self.system, kind=stage.kind,
                                             permission=stage.permission, cost=stage.cost, op_id=op_id)
         except FactoryDenied as exc:
             self._fail_stage(plan, stage, reports, f"assign_denied: {exc.code}", agent_id=picked.agent_id)

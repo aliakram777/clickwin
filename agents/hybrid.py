@@ -475,7 +475,7 @@ class ContextBuilder:
 @dataclass(frozen=True)
 class Attempt:
     engine: str
-    outcome: str   # ok | unavailable | timeout_unknown | blocked | skipped_unavailable | skipped_unsupported | skipped_consent | skipped_egress | skipped_mock
+    outcome: str   # ok | unavailable | timeout_unknown | blocked | skipped_unavailable | skipped_unsupported | skipped_consent | skipped_egress | skipped_mock | skipped_budget
     detail: str = ""
 
 
@@ -574,7 +574,7 @@ class HybridRouter:
 
     # --- əsas giriş ---
     def route(self, request_id: str, kind: str, prompt: str, system: str = "", context: Sequence[MemoryRecord] = (),
-              allow_mock: bool = True) -> RouteResult:
+              allow_mock: bool = True, allow_paid: bool = True) -> RouteResult:
         mode = self.store.mode()
         if not isinstance(request_id, str) or not _RID.match(request_id) or kind not in KINDS \
                 or not isinstance(prompt, str) or not prompt.strip() or len(prompt) > MAX_PROMPT or not isinstance(system, str):
@@ -590,7 +590,7 @@ class HybridRouter:
         if state == "in_progress":
             return RouteResult("in_progress", request_id, mode=mode.value, reason="eyni sorğu artıq icra olunur")
         try:
-            res = self._attempt(request_id, mode, classify_task(kind, prompt), prompt, system, context, allow_mock)
+            res = self._attempt(request_id, mode, classify_task(kind, prompt), prompt, system, context, allow_mock, allow_paid)
         except BaseException:
             self.store.fail(request_id)
             raise
@@ -599,7 +599,7 @@ class HybridRouter:
         return res
 
     def _attempt(self, request_id: str, mode: Mode, task: Task, prompt: str, system: str, context: Sequence[MemoryRecord],
-                 allow_mock: bool = True) -> RouteResult:
+                 allow_mock: bool = True, allow_paid: bool = True) -> RouteResult:
         attempts: list[Attempt] = []
         consent_needed: list[str] = []
         egress_blocked = False
@@ -615,6 +615,9 @@ class HybridRouter:
                 continue
             if st.is_mock and not allow_mock:
                 add(eng, "skipped_mock", "simulyasiya mühərriki bu sorğu üçün icazəli deyil")
+                continue
+            if not allow_paid and "cloud_paid_use" in eng.consent_scopes():   # çağıranın ödənişli büdcəsi yoxdur: ödənişli mühərrik heç yoxlanmır
+                add(eng, "skipped_budget", "ödənişli istifadə üçün büdcə yoxdur")
                 continue
             ok, why = eng.supports(task)
             if not ok:
@@ -660,6 +663,8 @@ class HybridRouter:
             status = "consent_required"
         elif egress:
             status = "blocked_egress"
+        elif any(a.outcome == "skipped_budget" for a in attempts) and not any(a.outcome in ("unavailable", "timeout_unknown") for a in attempts):
+            status = "budget_exhausted"
         elif mode is Mode.CLOUD:
             status = "cloud_unavailable"
         elif mode is Mode.LOCAL:
