@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NAYMERA</string>
+    <string name="tab_chat">Söhbət</string>
+    <string name="tab_notifications">Bildirişlər</string>
+    <string name="tab_history">Tarixçə</string>
+    <string name="tab_settings">Ayarlar</string>
+    <string name="mock_badge">SİMULYASİYA</string>
+    <string name="voice_mock_notice">SİMULYASİYA: real səs tanıma və sintez qoşulmayıb.</string>
+</resources>

@@ -1,6 +1,6 @@
 # NAYMERA — Məhsul yol xəritəsi
 
-Tarix: 2026-11-17 · Əsas: `claude/stage12-research-intelligence` (mərhələ 1–12; PR #1–#12 zəncirvari açıqdır, birləşdirilməyib).
+Tarix: 2026-11-17 · Əsas: `claude/stage12-research-intelligence` (mərhələ 1–12; Mərhələ 13 üzərində işlənir; PR #1–#12 zəncirvari açıqdır, birləşdirilməyib).
 
 Bu sənəd plandır, vədi yox. Gəlir, qazanc və ya gəlirli nəticə haqqında heç bir iddia yoxdur; trading itkiyə səbəb ola bilər
 (bax: bölmə 6).
@@ -197,3 +197,8 @@ Android (səs/mətn) → tapşırıq qəbulu → spesifikasiya və plan (LLM TƏ
 3. Hosting (lokal, VPS) və domen; Builder üçün hədəf texnologiyalar.
 4. Trading: birja, yurisdiksiya, ilk risk hədləri, paper meyarları.
 5. PR #1–#12 birləşmə qaydası (hazırda zəncirvari base-lərlə açıqdır); `ROADMAP.md` PR #5-in branch-ında da mövcuddur, birləşmədə toqquşma ola bilər.
+
+## Mərhələ 13 — Android API və tətbiq bünövrəsi (status)
+- Backend API (`api/`): cihaz cütləşməsi, token fırlanması, söhbət, hadisə axını, bildirişlər, yaddaş, şirkət (yalnız oxu), CEO işləri, təsdiq (step-up), stop/resume, səs interfeysi (mock) — **hazırdır və testlənib (805 test)**.
+- Android (`android/`): Kotlin + Compose layihəsi yazılıb, **APK build EDİLMƏYİB** (Android SDK mühitdə yoxdur). Növbəti addım: sahibin maşınında build və cihaz yoxlaması.
+- Sonrakı: real səs (az-AZ qadın) provayderi, FCM push, Keystore-a bağlı biometrik açar, real LLM konfiqurasiyası — hamısı sahib təsdiqi tələb edir.

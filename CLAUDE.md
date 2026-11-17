@@ -1,7 +1,7 @@
 # CLAUDE.md — NAYMERA
 
 Agent sistemi: CEO agent + şöbə agentləri. Stack: Python 3.12, pytest, SQLite.
-Mərhələ 1-12 hazırdır (7: Effect Broker; 8: təsdiq; 9: Tool Runtime; 10: LLM adapter — interfeys və mock; 11: yaddaş və virtual şirkət; 12: internet araşdırması, proaktiv zəka, Android-first interfeyslər). Əsas platforma: Android APK (Telegram əsas deyil): agent yaratma, təhlükəsizlik qapısı, reyestr, orkestrator, CEO agent, xərc kitabı, büdcə siyasəti, asılılıq qrafı və retry (bax: STATUS.md).
+Mərhələ 1-13 hazırdır (13: Android API + Kotlin/Compose layihəsi, APK build EDİLMƏYİB; 7: Effect Broker; 8: təsdiq; 9: Tool Runtime; 10: LLM adapter — interfeys və mock; 11: yaddaş və virtual şirkət; 12: internet araşdırması, proaktiv zəka, Android-first interfeyslər). Əsas platforma: Android APK (Telegram əsas deyil): agent yaratma, təhlükəsizlik qapısı, reyestr, orkestrator, CEO agent, xərc kitabı, büdcə siyasəti, asılılıq qrafı və retry (bax: STATUS.md).
 
 ## Mütləq qaydalar
 
@@ -25,7 +25,8 @@ Mərhələ 1-12 hazırdır (7: Effect Broker; 8: təsdiq; 9: Tool Runtime; 10: L
    Yeni yan təsirli kod (alət, agent icrası) yalnız `EffectBroker.run` üzərindən işləyir; alətləri `@broker_only` ilə bəzə.
    Alətlər yalnız `ToolRuntime` ilə (qeydiyyatlı allowlist, `@tool_handler`); shell/şəbəkə/sistem/env alətləri defoltda bağlıdır və yalnız təsdiqlənmiş OS sandbox adapteri ilə mümkündür. In-process məhdudiyyətləri OS sandbox kimi təqdim etmə.
    Həssas effektlər `ApprovalService` ilə təsdiqlənir: agentlər/broker `ApprovalGateway`-ə (approve/deny) çıxış almır; testdəki mock təsdiqi (`kind="mock"`) real istifadəçi təsdiqi kimi təqdim olunmur.
-6. Soruşulmayan kod yazma: tapşırığın çərçivəsindən kənara çıxma.
+6. **API/Android:** `api/` modulları `safety.broker/gate/tools/workspace/ledger` import etmir və env/şəbəkə istifadə etmir; təsdiq yalnız cihaz step-up sübutu ilə (səs/söhbət mətni heç vaxt); APK-da API açarı olmaz; build edilmədiyi halda "APK hazırdır" demə.
+7. Soruşulmayan kod yazma: tapşırığın çərçivəsindən kənara çıxma.
 
 ## Əmrlər
 
@@ -69,6 +70,8 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 │   ├── llm.py                 # LLMProvider interfeysi, Secret/konfiqurasiya (env), GuardedLLM limitləri, MockProvider
 │   ├── llm_planner.py         # LLM yalnız TƏKLİF: plan və agent təsviri (ciddi doğrulama); icra CEO/Broker ilə
 │   └── ceo.py                 # CEO: plan, bölgü, toplama, yoxlama, hesabat, run_workflow + retry
+├── api/                       # Android API (stdlib): http.py (App/WSGI), auth.py (cütləşmə, tokenlər, step-up), chat.py, events.py, jobs.py, app.py (marşrutlar), bootstrap.py, server.py
+├── android/                   # Kotlin + Compose layihəsi (build edilməyib: BUILD_STATUS.md); APK-da açar yoxdur
 ├── safety/gate.py             # icazə, xərc limiti, təsdiq, audit, stop
 ├── safety/broker.py           # Effect Broker: stop -> təkrar -> rezerv -> Gate -> icra -> hesablaşma; @broker_only
 ├── safety/approvals.py        # təsdiq xidməti: hash-ə bağlı, vaxtlı, tək istifadəlik; Client (broker) / Gateway (kanallar)
@@ -76,7 +79,7 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 ├── safety/tools.py            # Tool Runtime: allowlist, limitlər, SandboxAdapter interfeysi (real OS sandbox YOXDUR)
 ├── safety/workspace.py        # workspace fayl sərhədi (tətbiq səviyyəli) + fs.read/fs.write/fs.list
 ├── safety/ledger.py           # SQLite xərc kitabı: rezerv/təsdiq/azad, limitlər (data/ledger.db)
-└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration/workflow/retry/broker/approvals/approval_broker/workspace/tool_runtime/llm/llm_planner/memory/company/durable/research/proactive/mobile)
+└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration/workflow/retry/broker/approvals/approval_broker/workspace/tool_runtime/llm/llm_planner/memory/company/durable/research/proactive/mobile/api_http/api_auth/api_app/api_bootstrap/android_project)
 ```
 
 Yeni kod əlavə olunanda bu xəritəni yenilə.

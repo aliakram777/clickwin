@@ -119,6 +119,8 @@ class VoiceRecognizer(Protocol):
 
 class MockVoiceSynthesizer:
     """Real səs YARATMIR: yalnız interfeys müqaviləsini yoxlamaq üçün. Nəticə `is_mock=True`."""
+    name = "mock"
+    is_mock = True
 
     def __init__(self) -> None:
         self.calls = 0
@@ -129,6 +131,9 @@ class MockVoiceSynthesizer:
 
 
 class MockVoiceRecognizer:
+    name = "mock"
+    is_mock = True
+
     def __init__(self, script: list[str]) -> None:
         self.script = list(script)
 
