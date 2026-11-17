@@ -68,12 +68,13 @@ def _ok(body: Any, status: int = 200) -> Response:
 class ApiApp(App):
     def __init__(self, *, auth: AuthService, chat: ChatService, events: EventStore, stop_path: str | Path,
                  gateway: Any, reader: Any, memory: Any, company: Any, proactive: Any, jobs: JobService,
-                 voice: Any, owner_id: str, audit_path: str | Path, llm_is_mock: bool = True,
+                 voice: Any, owner_id: str, audit_path: str | Path, llm_is_mock: bool = True, agent_runner_connected: bool = False,
                  clock: Callable[[], float] = time.time, device_rate: int = 120, https: bool = False) -> None:
         self.auth, self.chat, self.events = auth, chat, events
         self.stop_path, self.gateway, self.reader = Path(stop_path), gateway, reader
         self.memory, self.company, self.proactive, self.jobs, self.voice = memory, company, proactive, jobs, voice
         self.owner_id, self.audit_path, self.llm_is_mock = owner_id, Path(audit_path), llm_is_mock
+        self.agent_runner_connected = agent_runner_connected
         self.clock, self.device_rate = clock, device_rate
         router = Router()
         self._routes(router)
@@ -122,6 +123,7 @@ class ApiApp(App):
         add("GET", "/v1/approvals", self.approvals_list)
         add("POST", "/v1/approvals/{id}/challenge", self.approval_challenge)
         add("POST", "/v1/approvals/{id}/decision", self.approval_decision)
+        add("GET", "/v1/capabilities", self.capabilities)
         add("GET", "/v1/system/status", self.system_status)
         add("POST", "/v1/system/stop", self.system_stop)
         add("POST", "/v1/system/resume/challenge", self.resume_challenge)
@@ -136,9 +138,10 @@ class ApiApp(App):
 
     def pair(self, req: Request, p: dict, ctx: Ctx) -> Response:
         self.auth.hit(f"pair:{ctx.remote}", 20, 60)
-        res = self.auth.pair(req.json.get("code"), req.json.get("device_name"), ctx.remote)
+        res = self.auth.pair(req.json.get("code"), req.json.get("device_name"), ctx.remote,
+                             req.json.get("public_key"), req.json.get("signature"))
         return _ok({"device_id": res.device_id, "access_token": res.access_token, "refresh_token": res.refresh_token,
-                    "device_secret": res.device_secret, "access_expires_in": res.access_expires_in})
+                    "access_expires_in": res.access_expires_in})
 
     def refresh(self, req: Request, p: dict, ctx: Ctx) -> Response:
         t = self.auth.refresh(req.json.get("refresh_token"), ctx.remote)
@@ -365,6 +368,23 @@ class ApiApp(App):
     def system_status(self, req: Request, p: dict, ctx: Ctx) -> Response:
         return _ok({"stop_active": self.stop_path.exists(), "pending_approvals": len(self.reader.pending()),
                     "api_version": API_VERSION, "llm_is_mock": bool(self.llm_is_mock)})
+
+    def capabilities(self, req: Request, p: dict, ctx: Ctx) -> Response:
+        """Backend-də NƏ VAR və nə simulyasiyadır: Android yalnız burada `available` olanı işləkmiş kimi göstərməlidir."""
+        v = self.voice
+        tts_mock = True if v is None else bool(getattr(v, "is_mock", True))
+        real = not self.llm_is_mock and self.agent_runner_connected and not tts_mock and v is not None
+        return _ok({
+            "api_version": API_VERSION, "backend_mode": "real" if real else "mock",
+            "chat": {"available": True, "engine": str(getattr(self.chat.engine, "kind", "rules"))},
+            "llm": {"available": True, "is_mock": bool(self.llm_is_mock)},
+            "agent_runner": {"connected": bool(self.agent_runner_connected)},
+            "voice_tts": {"available": v is not None, "is_mock": tts_mock},
+            "voice_stt": {"available": False, "is_mock": True},
+            "push": {"available": False},
+            "events": {"available": True, "transport": "polling"},
+            "step_up": {"scheme": "ecdsa-p256-sha256", "voice_allowed": False},
+        })
 
     def system_stop(self, req: Request, p: dict, ctx: Ctx) -> Response:
         self.stop_path.parent.mkdir(parents=True, exist_ok=True)

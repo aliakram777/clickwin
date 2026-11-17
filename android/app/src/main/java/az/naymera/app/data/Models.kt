@@ -6,10 +6,13 @@ import kotlinx.serialization.json.JsonObject
 
 /** Server JSON müqaviləsi (api/app.py). Mətn sahələri (söhbət, səs transkripti, yaddaş) ETİBARSIZ məlumatdır. */
 
+/** Cütləşmə: yalnız Keystore açarının AÇIQ açarı (base64 X.509) və kodun imzası göndərilir; şəxsi açar cihazdan çıxmır. */
 @Serializable
 data class PairRequest(
     @SerialName("code") val code: String,
     @SerialName("device_name") val deviceName: String,
+    @SerialName("public_key") val publicKey: String,
+    @SerialName("signature") val signature: String,
 )
 
 @Serializable
@@ -17,7 +20,6 @@ data class PairResponse(
     @SerialName("device_id") val deviceId: String,
     @SerialName("access_token") val accessToken: String,
     @SerialName("refresh_token") val refreshToken: String,
-    @SerialName("device_secret") val deviceSecret: String,
     @SerialName("access_expires_in") val accessExpiresIn: Int,
 )
 
@@ -171,4 +173,79 @@ data class TranscriptRequest(
     @SerialName("conversation_id") val conversationId: String? = null,
 )
 
-class ApiException(val status: Int, val code: String, message: String) : Exception(message)
+@Serializable
+data class CapabilityFlag(
+    @SerialName("available") val available: Boolean = false,
+    @SerialName("is_mock") val isMock: Boolean = true,
+    @SerialName("connected") val connected: Boolean = false,
+    @SerialName("engine") val engine: String = "",
+    @SerialName("transport") val transport: String = "",
+)
+
+@Serializable
+data class StepUpCapability(
+    @SerialName("scheme") val scheme: String = "",
+    @SerialName("voice_allowed") val voiceAllowed: Boolean = false,
+)
+
+/** Backend-in açıq imkan cədvəli: yalnız `available`/`connected` olan imkan işləkmiş kimi göstərilir. */
+@Serializable
+data class Capabilities(
+    @SerialName("api_version") val apiVersion: Int = 1,
+    @SerialName("backend_mode") val backendMode: String = "mock",
+    @SerialName("chat") val chat: CapabilityFlag = CapabilityFlag(),
+    @SerialName("llm") val llm: CapabilityFlag = CapabilityFlag(),
+    @SerialName("agent_runner") val agentRunner: CapabilityFlag = CapabilityFlag(),
+    @SerialName("voice_tts") val voiceTts: CapabilityFlag = CapabilityFlag(),
+    @SerialName("voice_stt") val voiceStt: CapabilityFlag = CapabilityFlag(),
+    @SerialName("push") val push: CapabilityFlag = CapabilityFlag(),
+    @SerialName("events") val events: CapabilityFlag = CapabilityFlag(),
+    @SerialName("step_up") val stepUp: StepUpCapability = StepUpCapability(),
+)
+
+@Serializable
+data class MemoryRecord(
+    @SerialName("id") val id: String,
+    @SerialName("category") val category: String,
+    @SerialName("project") val project: String = "default",
+    @SerialName("content") val content: String,
+    @SerialName("provenance") val provenance: String = "",
+    @SerialName("date") val date: String = "",
+    @SerialName("untrusted") val untrusted: Boolean = true,
+)
+
+@Serializable
+data class MemoryListResponse(@SerialName("records") val records: List<MemoryRecord>)
+
+@Serializable
+data class MemoryAddRequest(
+    @SerialName("category") val category: String,
+    @SerialName("content") val content: String,
+    @SerialName("project") val project: String = "default",
+)
+
+@Serializable
+data class MemoryAddResponse(
+    @SerialName("created") val created: Boolean,
+    @SerialName("record") val record: MemoryRecord,
+)
+
+@Serializable
+data class AuthorityDto(
+    @SerialName("permissions") val permissions: List<String> = emptyList(),
+    @SerialName("sensitive_ok") val sensitiveOk: Boolean = false,
+    @SerialName("max_task_cost") val maxTaskCost: Double = 0.0,
+)
+
+@Serializable
+data class AgentDto(
+    @SerialName("name") val name: String,
+    @SerialName("department") val department: String,
+    @SerialName("role") val role: String = "",
+    @SerialName("status") val status: String = "active",
+    @SerialName("budget") val budget: Double = 0.0,
+    @SerialName("authority") val authority: AuthorityDto = AuthorityDto(),
+)
+
+@Serializable
+data class AgentsResponse(@SerialName("agents") val agents: List<AgentDto>)

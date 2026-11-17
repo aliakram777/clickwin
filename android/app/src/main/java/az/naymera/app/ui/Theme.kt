@@ -1,6 +1,5 @@
 package az.naymera.app.ui
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
@@ -18,6 +17,7 @@ private val Dark = darkColorScheme(
     primary = Teal, onPrimary = Ink, secondary = Violet, background = Ink, onBackground = Color(0xFFE8ECF8),
     surface = Color(0xFF131A2E), onSurface = Color(0xFFE8ECF8), surfaceVariant = Color(0xFF1B2440),
     onSurfaceVariant = Color(0xFFA9B3D1), error = Color(0xFFFF6B7A),
+    primaryContainer = Color(0xFF0F3D3A), tertiaryContainer = Color(0xFF3A2F12),
 )
 
 private val Light = lightColorScheme(
@@ -29,7 +29,8 @@ private val AppShapes = Shapes(
     small = RoundedCornerShape(12.dp), medium = RoundedCornerShape(18.dp), large = RoundedCornerShape(28.dp),
 )
 
+/** Defolt qaranlıq tema (premium, tünd); işıqlı tema yalnız açıq seçimlə. */
 @Composable
-fun NaymeraTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
+fun NaymeraTheme(dark: Boolean = true, content: @Composable () -> Unit) {
     MaterialTheme(colorScheme = if (dark) Dark else Light, shapes = AppShapes, content = content)
 }

@@ -30,13 +30,16 @@ def test_project_structure_exists():
                 "app/build.gradle.kts", "app/proguard-rules.pro", "app/src/main/AndroidManifest.xml",
                 "app/src/main/res/values/strings.xml", "app/src/main/res/values/themes.xml",
                 "app/src/main/res/xml/network_security_config.xml",
-                "app/src/debug/res/xml/network_security_config.xml"):
+                "app/src/debug/res/xml/network_security_config.xml", "app/src/main/res/xml/locales_config.xml",
+                "app/src/main/res/values-en/strings.xml", "app/src/main/res/values-ru/strings.xml",
+                "app/src/main/res/values-tr/strings.xml"):
         assert (AND / rel).is_file(), rel
     names = {p.name for p in KT}
     for expected in ("MainActivity.kt", "NaymeraApp.kt", "Theme.kt", "ChatScreen.kt", "ChatViewModel.kt",
                      "NotificationsScreen.kt", "HistoryScreen.kt", "PairingScreen.kt", "ApiClient.kt",
                      "SessionStore.kt", "Models.kt", "EventSync.kt", "VoiceInterfaces.kt", "StepUp.kt",
-                     "ApprovalScreen.kt"):
+                     "ApprovalScreen.kt", "DeviceKey.kt", "HomeScreen.kt", "MemoryScreen.kt", "AgentsScreen.kt",
+                     "ApiFailure.kt", "UiText.kt"):
         assert expected in names, expected
 
 
@@ -121,7 +124,8 @@ def _server_routes():
 def test_kotlin_models_cover_the_server_json_keys():
     models = text(next(p for p in KT if p.name == "Models.kt"))
     names = set(re.findall(r'@SerialName\("([a-z_]+)"\)', models))
-    required = {"access_token", "refresh_token", "device_secret", "device_id", "conversation_id", "user_message",
+    required = {"access_token", "refresh_token", "public_key", "signature", "backend_mode", "agent_runner", "voice_tts",
+                "push", "step_up", "scheme", "device_id", "conversation_id", "user_message",
                 "assistant_message", "speech_text", "is_mock", "provenance", "input_mode", "importance", "priority",
                 "dedupe_key", "schema_version", "events", "next_cursor", "challenge_id", "nonce", "payload_hash",
                 "approvals", "expires_in", "stop_active", "pending_approvals", "untrusted"}
@@ -141,18 +145,133 @@ def test_voice_layer_is_separate_labeled_and_never_reaches_approvals():
     assert "BiometricPrompt" in step and '"voice"' not in step and "biometric" in step
     strings = text(SRC / "res" / "values" / "strings.xml")
     assert "SİMULYASİYA" in strings and "Söhbət" in strings and "Bildirişlər" in strings and "Tarixçə" in strings
+    assert "Yaddaş" in strings and "Agentlər" in strings
 
 
 def test_session_storage_never_holds_server_or_third_party_keys():
     store = text(next(p for p in KT if p.name == "SessionStore.kt"))
-    assert "EncryptedSharedPreferences" in store and "refresh_token" in store and "device_secret" in store
+    assert "EncryptedSharedPreferences" in store and "refresh_token" in store
+    assert "device_secret" not in store and "privateKey" not in store  # şəxsi açar yalnız Android Keystore-dadır
     assert "api_key" not in store.lower() and "openai" not in store.lower() and "anthropic" not in store.lower()
 
 
 def test_ui_has_the_required_screens():
     nav = text(next(p for p in KT if p.name == "NaymeraApp.kt"))
-    for dest in ("chat", "notifications", "history", "settings"):
+    for dest in ("home", "chat", "memory", "notifications", "agents", "history", "settings"):
         assert f'"{dest}"' in nav, dest
     chat = text(next(p for p in KT if p.name == "ChatScreen.kt"))
     assert "isMock" in chat and "OutlinedTextField" in chat or "TextField" in chat
     assert "Mic" in chat  # səsli ünsiyyət düyməsi
+    assert "enabled = vm.voiceAvailable" in chat  # real STT yoxdursa düymə söndürülür (işləyirmiş kimi göstərilmir)
+
+
+# --- Stage 14: Keystore, imza, yerlişdirmə (i18n), şəbəkə xətaları, mock/real fərqi ---
+
+ALL_KT = "\n".join(text(p) for p in KT)
+
+
+def strings_of(locale_dir):
+    xml = text(SRC / "res" / locale_dir / "strings.xml")
+    return dict(re.findall(r'<string name="([a-z0-9_]+)">([^<]*)</string>', xml))
+
+
+def test_device_key_lives_in_android_keystore_behind_biometrics_and_never_leaves_the_device():
+    key = text(next(p for p in KT if p.name == "DeviceKey.kt"))
+    for needle in ("AndroidKeyStore", "KeyGenParameterSpec", "KeyProperties.PURPOSE_SIGN", "secp256r1", "SHA256withECDSA",
+                   "setUserAuthenticationRequired(true)", "setInvalidatedByBiometricEnrollment(true)",
+                   "Signature.getInstance", "initSign", "publicKeySpki", "BiometricPrompt.CryptoObject"):
+        assert needle in key, needle
+    for banned in ("SharedPreferences", "privateKey.encoded", "private.encoded", "getEncoded()", "ObjectOutputStream", "Log."):
+        assert banned not in key, banned
+    # şəxsi açar yoxdur: yalnız açıq açar göndərilir
+    assert "PairRequest" in ALL_KT and "public_key" in text(next(p for p in KT if p.name == "Models.kt"))
+
+
+def test_no_shared_secret_or_hmac_remains_anywhere_in_the_android_project():
+    for banned in ("device_secret", "deviceSecret", "HmacSHA256", "SecretKeySpec", "Mac.getInstance"):
+        assert banned not in ALL_KT, banned
+
+
+def test_step_up_signs_with_the_keystore_key_and_matches_the_server_message_format():
+    step = text(next(p for p in KT if p.name == "StepUp.kt"))
+    assert "DeviceKey" in step and "CryptoObject" in step and '"naymera-step-up"' in step and 'joinToString("|")' in step
+    assert 'method = "voice"' not in step and "voice" not in step.lower().replace("voice_", "")
+    key = text(next(p for p in KT if p.name == "DeviceKey.kt"))
+    assert '"naymera-pair|' in key or '"naymera-pair"' in key
+
+
+def test_network_failures_timeouts_and_disconnects_are_modeled_explicitly():
+    fail = text(next(p for p in KT if p.name == "ApiFailure.kt"))
+    for kind in ("Offline", "Timeout", "Unauthorized", "Forbidden", "Conflict", "RateLimited", "Server", "Unavailable", "Unknown"):
+        assert kind in fail, kind
+    client = text(next(p for p in KT if p.name == "ApiClient.kt"))
+    for needle in ("callTimeout", "connectTimeout", "readTimeout", "SocketTimeoutException", "UnknownHostException",
+                   "ConnectException", "SSLException", "IOException", "Mutex", 'method == "GET"', "backoff"):
+        assert needle in client, needle
+    assert "followRedirects(false)" in client
+    sync = text(next(p for p in KT if p.name == "EventSync.kt"))
+    for needle in ("ConnectionState", "Connected", "Reconnecting", "Offline", "backoff", "401"):
+        assert needle in sync, needle
+
+
+def test_mock_and_real_backend_modes_are_visibly_distinguished_and_missing_features_are_not_faked():
+    home = text(next(p for p in KT if p.name == "HomeScreen.kt"))
+    for needle in ("backendMode", "mode_mock", "mode_real", "agentRunner", "feature_unavailable", "capabilities"):
+        assert needle in home, needle
+    agents = text(next(p for p in KT if p.name == "AgentsScreen.kt"))
+    assert "agent_runner_missing" in agents and "agentRunner" in agents
+    notif = text(next(p for p in KT if p.name == "NotificationsScreen.kt"))
+    assert "push_unavailable" in notif
+    client = text(next(p for p in KT if p.name == "ApiClient.kt"))
+    assert "/v1/capabilities" in client and "/v1/memory" in client and "/v1/company/agents" in client
+
+
+def test_azerbaijani_is_the_default_and_en_ru_tr_are_complete():
+    az = strings_of("values")
+    assert "Söhbət" in az.values() and len(az) >= 40
+    for loc in ("values-en", "values-ru", "values-tr"):
+        other = strings_of(loc)
+        assert set(other) == set(az), (loc, set(az) ^ set(other))
+        assert all(v.strip() for v in other.values()), loc
+        same = [k for k in az if other[k] == az[k] and len(az[k]) > 6 and k != "app_name" and not k.startswith("lang_")]
+        assert len(same) <= 8, (loc, same)  # tərcümə edilməmiş (kopya) sətirlər
+    # sətir formatlaması: yer tutucular dillər arasında uyğundur
+    for loc in ("values-en", "values-ru", "values-tr"):
+        other = strings_of(loc)
+        for k, v in az.items():
+            assert sorted(re.findall(r"%\d\$[sd]", v)) == sorted(re.findall(r"%\d\$[sd]", other[k])), (loc, k)
+    cfg = text(SRC / "res" / "xml" / "locales_config.xml")
+    assert all(f'android:name="{l}"' in cfg for l in ("az", "en", "ru", "tr"))
+    assert "android:localeConfig" in text(SRC / "AndroidManifest.xml")
+
+
+def test_ui_has_no_hardcoded_user_visible_text():
+    ui_files = [p for p in KT if p.parent.name == "ui" or p.name in {"NaymeraApp.kt"}]
+    assert len(ui_files) >= 9
+    for p in ui_files:
+        c = re.sub(r"/\*.*?\*/|//[^\n]*", "", text(p), flags=re.S)
+        assert not re.search(r"[əıöüşçğƏİÖÜŞÇĞ]", "".join(re.findall(r'"[^"\n]*"', c))), p.name
+        assert not re.search(r'\bText\(\s*"', c), p.name
+        assert not re.search(r'(label|placeholder|contentDescription|title|subtitle)\s*=\s*(\{\s*Text\()?"', c), p.name
+        if p.name not in {"Theme.kt", "UiText.kt", "ChatViewModel.kt", "MainViewModel.kt"}:
+            assert "stringResource(" in c or "uiText(" in c, p.name
+    # tərcümə açarları mövcuddur
+    keys = set(strings_of("values"))
+    used = set(re.findall(r"R\.string\.([a-z0-9_]+)", ALL_KT))
+    assert used <= keys, used - keys
+
+
+def test_interface_is_dark_by_default_and_has_the_required_sections():
+    theme = text(next(p for p in KT if p.name == "Theme.kt"))
+    assert "dark: Boolean = true" in theme
+    nav = text(next(p for p in KT if p.name == "NaymeraApp.kt"))
+    for screen in ("HomeScreen", "ChatScreen", "MemoryScreen", "NotificationsScreen", "AgentsScreen", "HistoryScreen"):
+        assert screen in nav, screen
+    assert "setApplicationLocales" in ALL_KT  # tətbiq daxili dil seçimi (az/en/ru/tr)
+
+
+def test_voice_stays_a_labeled_future_interface():
+    voice = text(next(p for p in KT if p.name == "VoiceInterfaces.kt"))
+    assert "MockSpeech" in voice and "isMock" in voice and "FEMALE" in voice and "az-AZ" in voice
+    chat_vm = text(next(p for p in KT if p.name == "ChatViewModel.kt"))
+    assert "stt.available" in chat_vm  # real STT yoxdursa transkript göndərilmir

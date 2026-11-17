@@ -184,7 +184,7 @@ def wsgi_adapter(app: App) -> Callable:
     def application(environ: dict, start_response: Callable) -> list[bytes]:
         def reply(resp: Response) -> list[bytes]:
             out = json.dumps(resp.body, ensure_ascii=False).encode("utf-8")
-            headers = list(resp.headers.items()) + [("Content-Length", str(len(out)))]
+            headers = list(resp.headers.items()) + [("Content-Length", str(len(out))), ("Server", "naymera")]  # sürüm sızmır
             start_response(f"{resp.status} {HTTPStatus(resp.status).phrase}", headers)
             return [out]
 

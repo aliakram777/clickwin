@@ -1,63 +1,61 @@
 package az.naymera.app.security
 
+import android.util.Base64
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
-import javax.crypto.Mac
-import javax.crypto.spec.SecretKeySpec
 import kotlin.coroutines.resume
 import kotlinx.coroutines.suspendCancellableCoroutine
 
 /**
- * Həssas əməliyyat təsdiqi (step-up). Cihaz sirri ilə HMAC sübutu YALNIZ uğurlu biometrik/cihaz kilidi açılışından sonra
- * hesablanır. Server sübutu yoxlayır (api/auth.py): sübut əməliyyatın action, subject, payload_hash və qərarına bağlıdır.
- * Metod həmişə "biometric"dir; başqa mənbə (söhbət mətni və s.) bu yola çıxmır.
+ * Həssas əməliyyat təsdiqi (step-up) və cütləşmə sahibliyi sübutu. İmza YALNIZ uğurlu güclü biometrik təsdiqdən sonra, Keystore
+ * açarı ilə (`DeviceKey`, `BiometricPrompt.CryptoObject`) yaranır; açar cihazdan çıxmır. Server imzanı açıq açarla yoxlayır
+ * (api/auth.py): imza action, subject, payload_hash və qərara bağlıdır. Metod həmişə "biometric"dir; söhbət mətni və ya başqa
+ * mənbə bu yola çıxmır.
  */
 object StepUp {
     const val METHOD = "biometric"
 
-    private const val AUTHENTICATORS =
-        BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL
-
     fun canAuthenticate(activity: FragmentActivity): Boolean =
-        BiometricManager.from(activity).canAuthenticate(AUTHENTICATORS) == BiometricManager.BIOMETRIC_SUCCESS
+        BiometricManager.from(activity).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
+            BiometricManager.BIOMETRIC_SUCCESS
 
-    /** Uğurlu açılışdan sonra true; ləğv/xəta halında false. */
-    suspend fun confirm(activity: FragmentActivity, title: String, subtitle: String): Boolean =
-        suspendCancellableCoroutine { cont ->
-            val executor = ContextCompat.getMainExecutor(activity)
-            val prompt = BiometricPrompt(activity, executor, object : BiometricPrompt.AuthenticationCallback() {
-                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    if (cont.isActive) cont.resume(true)
-                }
+    /** Server tərəfdə `AuthService.step_up_message` ilə eyni mesaj. */
+    fun challengeMessage(
+        challengeId: String, nonce: String, action: String, subject: String, payloadHash: String, decision: String,
+    ): ByteArray =
+        listOf("naymera-step-up", challengeId, nonce, action, subject, payloadHash, decision)
+            .joinToString("|").toByteArray(Charsets.UTF_8)
 
-                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    if (cont.isActive) cont.resume(false)
-                }
-            })
-            val info = BiometricPrompt.PromptInfo.Builder()
-                .setTitle(title)
-                .setSubtitle(subtitle)
-                .setAllowedAuthenticators(AUTHENTICATORS)
-                .build()
-            prompt.authenticate(info)
-            cont.invokeOnCancellation { prompt.cancelAuthentication() }
+    /** Biometrik təsdiq + imza. Ləğv/xəta/açar etibarsızlığı halında null; base64 (NO_WRAP) DER imza qaytarır. */
+    suspend fun sign(
+        activity: FragmentActivity, title: String, subtitle: String, cancel: String, message: ByteArray,
+    ): String? = suspendCancellableCoroutine { cont ->
+        val crypto = try { DeviceKey.cryptoObject() } catch (e: Exception) {
+            cont.resume(null)
+            return@suspendCancellableCoroutine
         }
+        val executor = ContextCompat.getMainExecutor(activity)
+        val prompt = BiometricPrompt(activity, executor, object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                val out = try {
+                    Base64.encodeToString(DeviceKey.signWith(result.cryptoObject ?: crypto, message), Base64.NO_WRAP)
+                } catch (e: Exception) { null }
+                if (cont.isActive) cont.resume(out)
+            }
 
-    /** HMAC-SHA256(device_secret, challenge_id|nonce|action|subject|payload_hash|decision) — server ilə eyni format. */
-    fun proof(
-        deviceSecretHex: String, challengeId: String, nonce: String, action: String, subject: String,
-        payloadHash: String, decision: String,
-    ): String {
-        val key = SecretKeySpec(hexToBytes(deviceSecretHex), "HmacSHA256")
-        val mac = Mac.getInstance("HmacSHA256").apply { init(key) }
-        val msg = listOf(challengeId, nonce, action, subject, payloadHash, decision).joinToString("|")
-        return mac.doFinal(msg.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
-    }
-
-    private fun hexToBytes(hex: String): ByteArray {
-        require(hex.length % 2 == 0) { "yanlış hex" }
-        return ByteArray(hex.length / 2) { hex.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                if (cont.isActive) cont.resume(null)
+            }
+        })
+        val info = BiometricPrompt.PromptInfo.Builder()
+            .setTitle(title)
+            .setSubtitle(subtitle)
+            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+            .setNegativeButtonText(cancel)
+            .build()
+        prompt.authenticate(info, crypto)
+        cont.invokeOnCancellation { prompt.cancelAuthentication() }
     }
 }

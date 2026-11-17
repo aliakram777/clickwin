@@ -1,18 +1,17 @@
 """Autentifikasiya: cihaz cütləşməsi, qısa ömürlü sessiya tokenləri, fırlanan yeniləmə tokenləri və step-up sübutu.
 
 Model: tək sahib (`owner_id`). Sahib yerli konsolda birdəfəlik cütləşmə kodu yaradır (HTTP ilə yaradıla bilməz); Android
-tətbiqi kodu `pair` ilə dəyişir və yalnız cihaza məxsus tokenləri + `device_secret` alır. APK-da heç bir server/API açarı
-olmur. Tokenlər və kodlar DB-də yalnız SHA-256 hash kimi saxlanır. Həssas əməliyyatlar (təsdiq, davam) üçün step-up:
-server bir dəfəlik `nonce` verir, cihaz `HMAC(device_secret, ...)` sübutunu (biometrik açılışdan sonra) qaytarır; sübut
-əməliyyatın nəyə aid olduğuna (action, subject, payload_hash, decision) bağlıdır.
-
-Məhdudiyyət: HMAC yoxlaması üçün `device_secret` serverdə də saxlanır (DB faylı 0600 olmalıdır); asimmetrik imza (məs. Keystore
-açarı) stdlib ilə yoxlana bilmədiyi üçün sonrakı mərhələyə saxlanıb.
+tətbiqi Keystore-da yaradılmış P-256 açar cütünün YALNIZ açıq açarını göndərir və kodu həmin açarla imzalayaraq sahibliyini
+sübut edir. Server heç vaxt şəxsi açar/sirr almır və saxlamır. Tokenlər və kodlar DB-də yalnız SHA-256 hash kimi saxlanır.
+Həssas əməliyyatlar (təsdiq, davam) üçün step-up: server bir dəfəlik `nonce` verir, cihaz (biometrik açılışdan sonra, Keystore
+açarı ilə) ECDSA-SHA256 imzası qaytarır; imza əməliyyatın nəyə aid olduğuna (action, subject, payload_hash, decision) bağlıdır.
+Yoxlama `api.p256` ilə (yalnız stdlib).
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
-import hmac
 import json
 import re
 import secrets
@@ -24,12 +23,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from agents.mobile import clean_text
+from api import p256
 from api.http import ApiError
 
 _CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 _TOKEN = re.compile(r"^nay_([ar])_[A-Za-z0-9_\-]{43}$")
 _CODE = re.compile(r"^[A-HJ-NP-Z2-9]{8}$")
-_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_B64 = re.compile(r"^[A-Za-z0-9+/]{1,400}={0,2}$")
 
 
 class AuthError(ApiError):
@@ -41,7 +41,6 @@ class PairResult:
     device_id: str
     access_token: str
     refresh_token: str
-    device_secret: str
     access_expires_in: int
 
 
@@ -85,7 +84,7 @@ class AuthService:
         for stmt in (
             "CREATE TABLE IF NOT EXISTS pairing_codes (code_hash TEXT PRIMARY KEY, expires REAL NOT NULL, "
             "used INTEGER NOT NULL DEFAULT 0)",
-            "CREATE TABLE IF NOT EXISTS devices (device_id TEXT PRIMARY KEY, name TEXT NOT NULL, secret TEXT NOT NULL, "
+            "CREATE TABLE IF NOT EXISTS devices (device_id TEXT PRIMARY KEY, name TEXT NOT NULL, public_key TEXT NOT NULL, "
             "status TEXT NOT NULL, created_at REAL NOT NULL, last_seen REAL NOT NULL)",
             "CREATE TABLE IF NOT EXISTS tokens (token_hash TEXT PRIMARY KEY, device_id TEXT NOT NULL, kind TEXT NOT NULL, "
             "expires REAL NOT NULL, used INTEGER NOT NULL DEFAULT 0)",
@@ -133,7 +132,21 @@ class AuthService:
         self._audit("auth_pairing_code_created")
         return code
 
-    def pair(self, code: Any, device_name: Any, remote: str) -> PairResult:
+    @staticmethod
+    def pair_message(code: str) -> bytes:
+        """Cütləşmədə cihazın imzaladığı mesaj (açar sahibliyi sübutu)."""
+        return b"naymera-pair|" + code.encode("utf-8")
+
+    @staticmethod
+    def _b64(value: Any, cap: int = 400) -> bytes | None:
+        if not isinstance(value, str) or not _B64.match(value) or len(value) > cap:
+            return None
+        try:
+            return base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError):
+            return None
+
+    def pair(self, code: Any, device_name: Any, remote: str, public_key: Any, signature: Any) -> PairResult:
         fail_key = f"pairfail:{remote}"
         if self._failures(fail_key, 600) >= 5:
             self._audit("auth_pair_denied", reason="lockout", remote=remote)
@@ -149,18 +162,25 @@ class AuthService:
         name = clean_text(device_name, 40) if isinstance(device_name, str) else ""
         if not name:
             raise AuthError(400, "bad_device_name", "Cihaz adı boş ola bilməz.")
+        pub, sig = self._b64(public_key), self._b64(signature)
+        if pub is None or sig is None:
+            raise AuthError(400, "bad_public_key", "Açıq açar və ya imza yanlışdır.")
+        if not p256.verify(pub, self.pair_message(code), sig):  # sahiblik sübutu (kod yandırılmazdan əvvəl)
+            self._record_failure(fail_key)
+            self._audit("auth_pair_denied", reason="bad_key_proof", remote=remote)
+            raise AuthError(400, "bad_public_key", "Açıq açar və ya imza yanlışdır.")
         now = self.clock()
         cur = self._conn.execute("UPDATE pairing_codes SET used = 1 WHERE code_hash = ? AND used = 0 AND expires > ?",
                                  (_h(code), now))
         if cur.rowcount != 1:
             raise deny("unknown_or_used_or_expired")
         device_id = "dev_" + secrets.token_hex(8)
-        secret = secrets.token_hex(32)
-        self._conn.execute("INSERT INTO devices (device_id, name, secret, status, created_at, last_seen) "
-                           "VALUES (?, ?, ?, 'active', ?, ?)", (device_id, name, secret, now, now))
+        self._conn.execute("INSERT INTO devices (device_id, name, public_key, status, created_at, last_seen) "
+                           "VALUES (?, ?, ?, 'active', ?, ?)",
+                           (device_id, name, base64.b64encode(pub).decode(), now, now))
         pair = self._issue(device_id)
         self._audit("auth_pair", device_id=device_id, remote=remote)
-        return PairResult(device_id, pair.access_token, pair.refresh_token, secret, pair.access_expires_in)
+        return PairResult(device_id, pair.access_token, pair.refresh_token, pair.access_expires_in)
 
     def _issue(self, device_id: str) -> TokenPair:
         now = self.clock()
@@ -226,11 +246,10 @@ class AuthService:
 
     # --- step-up ---
     @staticmethod
-    def compute_proof(device_secret: str, challenge_id: str, nonce: str, action: str, subject: str,
-                      payload_hash: str, decision: str) -> str:
-        """Cihaz tərəfindən (biometrik açılışdan sonra) hesablanan sübut: HMAC-SHA256(device_secret, ...)."""
-        msg = "|".join([challenge_id, nonce, action, subject, payload_hash, decision]).encode("utf-8")
-        return hmac.new(bytes.fromhex(device_secret), msg, hashlib.sha256).hexdigest()
+    def step_up_message(challenge_id: str, nonce: str, action: str, subject: str, payload_hash: str,
+                        decision: str) -> bytes:
+        """Cihazın imzaladığı mesaj: challenge + əməliyyatın bütün tərəfləri."""
+        return "|".join(["naymera-step-up", challenge_id, nonce, action, subject, payload_hash, decision]).encode("utf-8")
 
     def create_challenge(self, device_id: str, action: str, subject: str, payload_hash: str,
                          decision: str) -> Challenge:
@@ -261,7 +280,8 @@ class AuthService:
             self._audit("auth_stepup_denied", device_id=device_id, reason=reason)
             return AuthError(403, "stepup_failed", "Təsdiq sübutu qəbul olunmadı.")
 
-        if not isinstance(challenge_id, str) or not isinstance(proof, str) or not _HEX64.match(proof):
+        sig = self._b64(proof)
+        if not isinstance(challenge_id, str) or sig is None:
             raise deny("format")
         row = self._conn.execute("SELECT * FROM challenges WHERE id = ?", (challenge_id,)).fetchone()
         if row is None or row["device_id"] != device_id:
@@ -274,7 +294,7 @@ class AuthService:
         dev = self._device(device_id)
         if dev is None or dev["status"] != "active":
             raise deny("device_inactive")
-        expected = self.compute_proof(dev["secret"], challenge_id, row["nonce"], action, subject, payload_hash, decision)
-        if not hmac.compare_digest(expected, proof):
+        msg = self.step_up_message(challenge_id, row["nonce"], action, subject, payload_hash, decision)
+        if not p256.verify(base64.b64decode(dev["public_key"]), msg, sig):
             raise deny("bad_proof")
         self._audit("auth_stepup_ok", device_id=device_id, action=action, subject=subject)

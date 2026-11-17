@@ -1,12 +1,22 @@
 """API-nin yığılması (bootstrap) və server qoruyucuları. Heç bir real soket açılmır."""
+import base64
 import io
 import json
 
 import pytest
 
 from api.bootstrap import build_app
+from api.auth import AuthService
 from api.http import wsgi_adapter
 from api.server import DEFAULT_HOST, check_bind
+from tests.p256_tools import Keypair
+
+
+def pair_body(code, name="P"):
+    kp = Keypair()
+    b64 = lambda b: base64.b64encode(b).decode()
+    return {"code": code, "device_name": name, "public_key": b64(kp.spki()),
+            "signature": b64(kp.sign(AuthService.pair_message(code)))}
 
 
 def wsgi(app, method, path, body=None, token=None):
@@ -24,7 +34,7 @@ def test_default_stack_boots_pairs_and_answers_over_wsgi(tmp_path):
     svc = build_app(tmp_path)
     assert wsgi(svc.app, "GET", "/v1/health") == (200, {"status": "ok", "api_version": 1})
     code = svc.auth.create_pairing_code()
-    status, body = wsgi(svc.app, "POST", "/v1/pair", {"code": code, "device_name": "Pixel 8"})
+    status, body = wsgi(svc.app, "POST", "/v1/pair", pair_body(code, "Pixel 8"))
     assert status == 200
     tok = body["access_token"]
     assert wsgi(svc.app, "GET", "/v1/me", token=tok)[0] == 200
@@ -36,7 +46,7 @@ def test_default_stack_boots_pairs_and_answers_over_wsgi(tmp_path):
 def test_default_llm_is_mock_and_default_plans_are_rejected_safely(tmp_path):
     svc = build_app(tmp_path)
     code = svc.auth.create_pairing_code()
-    tok = wsgi(svc.app, "POST", "/v1/pair", {"code": code, "device_name": "P"})[1]["access_token"]
+    tok = wsgi(svc.app, "POST", "/v1/pair", pair_body(code, "P"))[1]["access_token"]
     status, body = wsgi(svc.app, "POST", "/v1/jobs", {"goal": "hesabat"}, token=tok)
     assert status == 201 and body["job"]["is_mock"] is True and body["job"]["ok"] is False
     assert wsgi(svc.app, "GET", "/v1/company/agents", token=tok)[1] == {"agents": []}
@@ -45,7 +55,7 @@ def test_default_llm_is_mock_and_default_plans_are_rejected_safely(tmp_path):
 def test_state_is_persistent_across_restarts(tmp_path):
     svc = build_app(tmp_path)
     code = svc.auth.create_pairing_code()
-    tok = wsgi(svc.app, "POST", "/v1/pair", {"code": code, "device_name": "P"})[1]["access_token"]
+    tok = wsgi(svc.app, "POST", "/v1/pair", pair_body(code, "P"))[1]["access_token"]
     cid = wsgi(svc.app, "POST", "/v1/chat/messages", {"text": "salam"}, token=tok)[1]["conversation_id"]
     again = build_app(tmp_path)  # proses yenidən başladı
     assert wsgi(again.app, "GET", "/v1/me", token=tok)[0] == 200
