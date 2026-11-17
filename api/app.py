@@ -6,6 +6,7 @@ etibarsızdır və heç nə icra/təsdiq etmir; (5) icra yalnız `JobService` ->
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -14,10 +15,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from agents.company import DEPARTMENTS
+from agents.hybrid import CLOUD_SHAREABLE_CATEGORIES, CONSENT_SCOPES, HybridRouter, Mode
 from agents.memory import Actor, MemoryDenied, detect_secrets
 from agents.mobile import EventStore, VoiceProfile, clean_text
+from agents.voice import SUPPORTED_LANGUAGES, VoiceAdapter, VoiceRegistry, summary as voice_summary
 from api.auth import AuthError, AuthService, Session
-from api.chat import MAX_TEXT, ChatService
+from api.chat import CLIENT_ID_RE, MAX_TEXT, ChatConflict, ChatService
 from api.events import EventNotificationChannel
 from api.http import ApiError, App, Ctx, Request, Response, Router
 from api.jobs import JobConflict, JobNotFound, JobService
@@ -27,6 +30,7 @@ API_VERSION = 1
 OWNER_MEMORY_CATEGORIES = ("project", "task", "decision", "note")
 STEP_UP_METHODS = ("biometric", "device_credential")
 _LANG = re.compile(r"^[a-z]{2}-[A-Z]{2}$")
+SUPPORTED_TAGS = tuple(SUPPORTED_LANGUAGES.values())
 
 
 def _int(value: Any, name: str, lo: int, hi: int, default: int | None = None) -> int:
@@ -69,12 +73,17 @@ class ApiApp(App):
     def __init__(self, *, auth: AuthService, chat: ChatService, events: EventStore, stop_path: str | Path,
                  gateway: Any, reader: Any, memory: Any, company: Any, proactive: Any, jobs: JobService,
                  voice: Any, owner_id: str, audit_path: str | Path, llm_is_mock: bool = True, agent_runner_connected: bool = False,
-                 clock: Callable[[], float] = time.time, device_rate: int = 120, https: bool = False) -> None:
+                 clock: Callable[[], float] = time.time, device_rate: int = 120, https: bool = False,
+                 ai: HybridRouter | None = None, voice_registry: VoiceRegistry | None = None) -> None:
         self.auth, self.chat, self.events = auth, chat, events
         self.stop_path, self.gateway, self.reader = Path(stop_path), gateway, reader
         self.memory, self.company, self.proactive, self.jobs, self.voice = memory, company, proactive, jobs, voice
         self.owner_id, self.audit_path, self.llm_is_mock = owner_id, Path(audit_path), llm_is_mock
         self.agent_runner_connected = agent_runner_connected
+        self.ai = ai
+        self.voice_registry = voice_registry or VoiceRegistry(
+            tts_local=VoiceAdapter("tts", "local", voice) if voice is not None else None,
+            consent=ai.store.consent if ai is not None else None)
         self.clock, self.device_rate = clock, device_rate
         router = Router()
         self._routes(router)
@@ -124,6 +133,12 @@ class ApiApp(App):
         add("POST", "/v1/approvals/{id}/challenge", self.approval_challenge)
         add("POST", "/v1/approvals/{id}/decision", self.approval_decision)
         add("GET", "/v1/capabilities", self.capabilities)
+        add("GET", "/v1/ai/status", self.ai_status)
+        add("POST", "/v1/ai/mode", self.ai_mode)
+        add("POST", "/v1/ai/challenge", self.ai_challenge)
+        add("POST", "/v1/ai/consent", self.ai_consent)
+        add("POST", "/v1/ai/privacy", self.ai_privacy)
+        add("GET", "/v1/voice/status", self.voice_status)
         add("GET", "/v1/system/status", self.system_status)
         add("POST", "/v1/system/stop", self.system_stop)
         add("POST", "/v1/system/resume/challenge", self.resume_challenge)
@@ -158,18 +173,22 @@ class ApiApp(App):
         return _ok({"ok": True})
 
     # --- söhbət ---
-    def _converse(self, text: str, cid: Any, mode: str, confidence: float | None) -> dict[str, Any]:
+    def _converse(self, text: str, cid: Any, mode: str, confidence: float | None, client_id: Any = None) -> dict[str, Any]:
         if cid is not None and not isinstance(cid, str):
             raise ApiError(400, "bad_request", "conversation_id mətn olmalıdır.")
+        if client_id is not None and (not isinstance(client_id, str) or not CLIENT_ID_RE.match(client_id)):
+            raise ApiError(400, "bad_request", "client_request_id yanlışdır.")
         try:
-            return self.chat.send(text, cid, mode, confidence)
+            return self.chat.send(text, cid, mode, confidence, client_id)
         except KeyError:
             raise ApiError(404, "not_found", "Söhbət tapılmadı.") from None
+        except ChatConflict:
+            raise ApiError(409, "request_id_reused", "client_request_id başqa məzmunla istifadə olunub.") from None
 
     def chat_send(self, req: Request, p: dict, ctx: Ctx) -> Response:
         text = _text(req.json, "text", MAX_TEXT)
         _no_secret(text)
-        return _ok(self._converse(text, req.json.get("conversation_id"), "text", None))
+        return _ok(self._converse(text, req.json.get("conversation_id"), "text", None, req.json.get("client_request_id")))
 
     def chat_list(self, req: Request, p: dict, ctx: Ctx) -> Response:
         return _ok({"conversations": self.chat.store.conversations(_int(req.query.get("limit"), "limit", 1, 100, 50))})
@@ -367,24 +386,35 @@ class ApiApp(App):
     # --- sistem ---
     def system_status(self, req: Request, p: dict, ctx: Ctx) -> Response:
         return _ok({"stop_active": self.stop_path.exists(), "pending_approvals": len(self.reader.pending()),
-                    "api_version": API_VERSION, "llm_is_mock": bool(self.llm_is_mock)})
+                    "api_version": API_VERSION, "llm_is_mock": self._llm_is_mock()})
+
+    def _llm_is_mock(self) -> bool:
+        if self.ai is None:
+            return bool(self.llm_is_mock)
+        st = self.ai.status()
+        return not any(e.usable and not e.is_mock for e in (st.cloud, st.local))
 
     def capabilities(self, req: Request, p: dict, ctx: Ctx) -> Response:
         """Backend-də NƏ VAR və nə simulyasiyadır: Android yalnız burada `available` olanı işləkmiş kimi göstərməlidir."""
         v = self.voice
         tts_mock = True if v is None else bool(getattr(v, "is_mock", True))
-        real = not self.llm_is_mock and self.agent_runner_connected and not tts_mock and v is not None
-        return _ok({
+        llm_mock = self._llm_is_mock()
+        real = not llm_mock and self.agent_runner_connected and not tts_mock and v is not None
+        body = {
             "api_version": API_VERSION, "backend_mode": "real" if real else "mock",
             "chat": {"available": True, "engine": str(getattr(self.chat.engine, "kind", "rules"))},
-            "llm": {"available": True, "is_mock": bool(self.llm_is_mock)},
+            "llm": {"available": True if self.ai is None else self.ai.status().active != "none", "is_mock": llm_mock},
             "agent_runner": {"connected": bool(self.agent_runner_connected)},
             "voice_tts": {"available": v is not None, "is_mock": tts_mock},
             "voice_stt": {"available": False, "is_mock": True},
             "push": {"available": False},
             "events": {"available": True, "transport": "polling"},
             "step_up": {"scheme": "ecdsa-p256-sha256", "voice_allowed": False},
-        })
+        }
+        if self.ai is not None:
+            st = self.ai.status()
+            body["ai"] = {"mode": st.mode, "active": st.active, "cloud": self._engine_dto(st.cloud), "local": self._engine_dto(st.local)}
+        return _ok(body)
 
     def system_stop(self, req: Request, p: dict, ctx: Ctx) -> Response:
         self.stop_path.parent.mkdir(parents=True, exist_ok=True)
@@ -418,11 +448,11 @@ class ApiApp(App):
         if isinstance(conf, bool) or not isinstance(conf, (int, float)) or not 0 <= conf <= 1:
             raise ApiError(400, "bad_request", "confidence 0..1 olmalıdır.")
         lang = b.get("language")
-        if not isinstance(lang, str) or not _LANG.match(lang):
-            raise ApiError(400, "bad_request", "language 'az-AZ' formatında olmalıdır.")
+        if not isinstance(lang, str) or not _LANG.match(lang) or lang not in SUPPORTED_TAGS:
+            raise ApiError(400, "bad_request", f"language {list(SUPPORTED_TAGS)} sahəsindən olmalıdır.")
         _no_secret(text)
         # Transkript etibarsız söhbət girişidir: təsdiq/icra yolu yoxdur.
-        return _ok(self._converse(text, b.get("conversation_id"), "voice", float(conf)))
+        return _ok(self._converse(text, b.get("conversation_id"), "voice", float(conf), b.get("client_request_id")))
 
     def voice_synthesize(self, req: Request, p: dict, ctx: Ctx) -> Response:
         text = _text(req.json, "text", 1000)
@@ -431,3 +461,91 @@ class ApiApp(App):
         res = self.voice.synthesize(text, VoiceProfile())
         return _ok({"text": res.text, "profile": res.profile.to_dict(), "audio_ref": res.audio_ref,
                     "is_mock": bool(res.is_mock)})
+
+
+    # --- hibrid AI ---
+    @staticmethod
+    def _engine_dto(e: Any) -> dict[str, Any]:
+        return {"name": e.name, "state": e.state, "is_mock": bool(e.is_mock), "reason": clean_text(e.reason, 120), "model": clean_text(e.model, 60),
+                "supported_kinds": list(e.supported_kinds), "consent_needed": list(e.consent_needed)}
+
+    def _router(self) -> HybridRouter:
+        if self.ai is None:
+            raise ApiError(503, "ai_unavailable", "Hibrid AI router qoşulmayıb.")
+        return self.ai
+
+    def ai_status(self, req: Request, p: dict, ctx: Ctx) -> Response:
+        r = self._router()
+        st, pv = r.status(), r.store.privacy()
+        return _ok({"mode": st.mode, "active": st.active, "cloud": self._engine_dto(st.cloud), "local": self._engine_dto(st.local),
+                    "consents": r.store.consents(),
+                    "privacy": {"cloud_may_receive_memory": pv.cloud_may_receive_memory, "cloud_categories": list(pv.cloud_categories)},
+                    "voice": voice_summary(self.voice_registry)})
+
+    def ai_mode(self, req: Request, p: dict, ctx: Ctx) -> Response:
+        r = self._router()
+        mode = req.json.get("mode")
+        if not isinstance(mode, str) or mode not in {m.value for m in Mode}:
+            raise ApiError(400, "bad_request", "mode auto|cloud|local olmalıdır.")
+        r.store.set_mode(mode, f"device:{ctx.session.device_id}")
+        self._audit("api_ai_mode", device_id=ctx.session.device_id, mode=mode)
+        return _ok({"mode": mode, "active": r.status().active})
+
+    @staticmethod
+    def _consent_binding(scope: Any, granted: Any) -> tuple[str, str, str]:
+        if scope not in CONSENT_SCOPES or not isinstance(granted, bool):
+            raise ApiError(400, "bad_request", f"scope {list(CONSENT_SCOPES)} və granted bool olmalıdır.")
+        return scope, hashlib.sha256(f"{scope}|{granted}".encode()).hexdigest(), "grant" if granted else "revoke"
+
+    @staticmethod
+    def _privacy_binding(body: dict) -> tuple[bool, tuple[str, ...], str]:
+        enabled, cats = body.get("cloud_may_receive_memory"), body.get("cloud_categories")
+        if not isinstance(enabled, bool) or not isinstance(cats, list) or not all(isinstance(c, str) for c in cats) \
+                or not set(cats) <= set(CLOUD_SHAREABLE_CATEGORIES):
+            raise ApiError(400, "bad_request", f"cloud_may_receive_memory bool, cloud_categories {list(CLOUD_SHAREABLE_CATEGORIES)} alt çoxluğu olmalıdır.")
+        cats_t = tuple(sorted(set(cats)))
+        return enabled, cats_t, hashlib.sha256(f"{enabled}|{','.join(cats_t)}".encode()).hexdigest()
+
+    def ai_challenge(self, req: Request, p: dict, ctx: Ctx) -> Response:
+        self._router()
+        action = req.json.get("action")
+        if action == "ai_consent":
+            subject, phash, decision = self._consent_binding(req.json.get("scope"), req.json.get("granted"))
+        elif action == "ai_privacy":
+            _, _, phash = self._privacy_binding(req.json)
+            subject, decision = "cloud_categories", "set"
+        else:
+            raise ApiError(400, "bad_request", "action ai_consent|ai_privacy olmalıdır.")
+        ch = self.auth.create_challenge(ctx.session.device_id, action, subject, phash, decision)
+        return _ok({"challenge_id": ch.id, "nonce": ch.nonce, "expires_in": ch.expires_in, "payload_hash": phash})
+
+    def ai_consent(self, req: Request, p: dict, ctx: Ctx) -> Response:
+        r = self._router()
+        scope, phash, decision = self._consent_binding(req.json.get("scope"), req.json.get("granted"))
+        granted = decision == "grant"
+        method = "none"
+        if granted:  # razılıq vermək həssasdır (xərc/məlumat ötürülməsi): cihaz imzası; geri götürmək asandır
+            method = self._step_up(ctx, req.json, "ai_consent", scope, phash, "grant")
+        r.store.set_consent(scope, granted, f"device:{ctx.session.device_id}")
+        self._audit("api_ai_consent", device_id=ctx.session.device_id, scope=scope, granted=granted, method=method)
+        return _ok({"ok": True, "scope": scope, "granted": granted})
+
+    def ai_privacy(self, req: Request, p: dict, ctx: Ctx) -> Response:
+        r = self._router()
+        enabled, cats, phash = self._privacy_binding(req.json)
+        cur = r.store.privacy()
+        narrowing = set(cats) <= set(cur.cloud_categories) and (not enabled or cur.cloud_may_receive_memory)
+        method = "none"
+        if not narrowing:
+            method = self._step_up(ctx, req.json, "ai_privacy", "cloud_categories", phash, "set")
+        r.store.set_privacy(enabled, cats, f"device:{ctx.session.device_id}")
+        pv = r.store.privacy()
+        self._audit("api_ai_privacy", device_id=ctx.session.device_id, categories=list(pv.cloud_categories), method=method)
+        return _ok({"ok": True, "privacy": {"cloud_may_receive_memory": pv.cloud_may_receive_memory, "cloud_categories": list(pv.cloud_categories)}})
+
+    def voice_status(self, req: Request, p: dict, ctx: Ctx) -> Response:
+        engines = [{"kind": e.kind, "location": e.location, "state": e.state, "is_mock": e.is_mock, "languages": list(e.languages),
+                    "gender": e.gender, "natural": e.natural, "reason": e.reason, "consent_needed": list(e.consent_needed)}
+                   for e in self.voice_registry.status()]
+        return _ok({"engines": engines, "languages": dict(SUPPORTED_LANGUAGES), "profile": {"gender": "female", "style": "natural"},
+                    "voice_may_approve": False})

@@ -25,7 +25,7 @@ import az.naymera.app.data.ConnectionState
 
 /** Əsas ekran: backend rejimi (mock/real), sistem vəziyyəti və imkan cədvəli. Backend-də olmayan imkan "yoxdur" göstərilir. */
 @Composable
-fun HomeScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
+fun HomeScreen(vm: MainViewModel, onDevice: az.naymera.app.data.OnDeviceLocal, modifier: Modifier = Modifier) {
     val state by vm.home.collectAsStateWithLifecycle()
     val connection by vm.connection.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { vm.refreshHome() }
@@ -56,6 +56,7 @@ fun HomeScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 }
             }
         }
+        AiPanel(vm, onDevice)
         state.status?.let { s ->
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {

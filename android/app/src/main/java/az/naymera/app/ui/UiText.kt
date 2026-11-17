@@ -31,3 +31,27 @@ fun Throwable.toUiText(): UiText = when (this) {
     is IllegalArgumentException -> UiText(R.string.err_invalid_url)
     else -> az.naymera.app.data.ApiFailure.fromThrowable(this).text()
 }
+
+/** Serverin `notice_code` dəyərini istifadəçi dilindəki mətn resursuna çevirir (naməlum kod: null). */
+fun noticeRes(code: String): Int? = when (code) {
+    "fallback" -> R.string.notice_fallback
+    "consent_required" -> R.string.notice_consent_required
+    "simulation_only" -> R.string.notice_simulation_only
+    "all_unavailable" -> R.string.notice_all_unavailable
+    "cloud_unavailable" -> R.string.notice_cloud_unavailable
+    "local_unavailable" -> R.string.notice_local_unavailable
+    "unsupported_locally" -> R.string.notice_unsupported_locally
+    "blocked" -> R.string.notice_blocked
+    "blocked_egress" -> R.string.notice_blocked_egress
+    "in_progress" -> R.string.notice_in_progress
+    "bad_request" -> R.string.notice_bad_request
+    "device_fallback" -> R.string.notice_device_fallback
+    else -> null
+}
+
+fun engineRes(engine: String, provenance: String): Int = when {
+    engine == "cloud" -> R.string.engine_cloud
+    engine == "local" -> R.string.engine_local
+    engine == "device" -> R.string.engine_device
+    else -> R.string.engine_rules
+}

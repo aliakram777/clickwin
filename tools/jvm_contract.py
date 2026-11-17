@@ -28,7 +28,7 @@ def main() -> int:
         env = dict(os.environ, NAYMERA_BACKEND_URL=f"http://127.0.0.1:{httpd.server_address[1]}",
                    NAYMERA_PAIR_CODES=",".join(codes), NAYMERA_APPROVAL_IDS=",".join(approvals))
         try:
-            return subprocess.run(["gradle", "--no-daemon", "-p", str(ROOT / "android" / "jvm-contract"), "test"],
+            return subprocess.run(["gradle", "--no-daemon", "-p", str(ROOT / "android" / "jvm-contract"), "cleanTest", "test"],
                                   env=env).returncode
         finally:
             httpd.shutdown()

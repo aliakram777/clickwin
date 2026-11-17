@@ -331,3 +331,59 @@ def test_build_status_documents_exact_requirements_blocker_and_local_steps():
 def test_launcher_icon_is_declared_and_exists():
     assert 'android:icon="@drawable/ic_launcher"' in text(SRC / "AndroidManifest.xml")
     assert (SRC / "res" / "drawable" / "ic_launcher.xml").is_file()
+
+
+# --- Stage 16: hibrid AI paneli, rejimlər, fallback, dürüst etiketlər ---
+
+def test_ai_models_and_client_fallback_are_pure_kotlin_and_cover_the_server_contract():
+    models = text(next(p for p in KT if p.name == "AiModels.kt"))
+    names = set(re.findall(r'@SerialName\("([a-z_]+)"\)', models + text(next(p for p in KT if p.name == "Models.kt"))))
+    assert {"mode", "active", "cloud", "local", "consents", "privacy", "voice", "state", "is_mock", "reason", "consent_needed",
+            "supported_kinds", "cloud_may_receive_memory", "cloud_categories", "tts", "stt", "client_request_id", "engine",
+            "notice", "notice_code"} <= names
+    for needle in ("enum class AiMode", "Auto", "Cloud", "Local", "enum class EngineBadge", "Simulation", "NotConfigured", "Unavailable"):
+        assert needle in models, needle
+    fb = text(next(p for p in KT if p.name == "ClientFallback.kt"))
+    for needle in ("interface OnDeviceLocal", "object NotConfiguredLocal", "fun decideRoute", "enum class ClientRoute", "OnDevice", "Unavailable"):
+        assert needle in fb, needle
+    for body in (models, fb):
+        assert "import android" not in body and "import androidx" not in body
+
+
+def test_on_device_local_ai_is_only_an_interface_without_downloads_or_embedded_models():
+    fb = text(next(p for p in KT if p.name == "ClientFallback.kt"))
+    assert "LocalState.NotConfigured" in fb or "NotConfigured" in fb
+    for banned in ("DownloadManager", "HttpURLConnection", "OkHttp", "huggingface", ".gguf", "http://", "https://"):
+        assert banned not in fb, banned
+    assert not [p for p in AND.rglob("*") if p.is_file() and not ({"build", ".gradle"} & set(p.relative_to(AND).parts))
+                and p.suffix in {".gguf", ".tflite", ".task", ".onnx", ".bin"}]
+
+
+def test_ai_panel_shows_cloud_local_active_mode_voice_and_mode_selection():
+    panel = text(next(p for p in KT if p.name == "AiPanel.kt"))
+    for needle in ("ai_cloud", "ai_local", "ai_active_mode", "ai_voice", "ai_mode_auto", "ai_mode_cloud", "ai_mode_local",
+                   "ai_state_simulation", "ai_state_not_configured", "ai_state_unavailable", "ai_state_ready", "AiMode.Auto",
+                   "AiMode.Cloud", "AiMode.Local", "setMode", "onDevice", "ai_consent_needed", "ai_cloud_no_fallback"):
+        assert needle in panel, needle
+    assert "AiPanel(" in text(next(p for p in KT if p.name == "HomeScreen.kt"))
+    client = text(next(p for p in KT if p.name == "ApiClient.kt"))
+    assert "/v1/ai/status" in client and "/v1/ai/mode" in client and "client_request_id" in text(next(p for p in KT if p.name == "Models.kt"))
+
+
+def test_chat_falls_back_only_on_connectivity_loss_and_reuses_the_client_request_id_on_retry():
+    vm = text(next(p for p in KT if p.name == "ChatViewModel.kt"))
+    for needle in ("decideRoute", "ClientRoute.OnDevice", "clientRequestId", "OnDeviceLocal", "AiMode", "device_fallback"):
+        assert needle in vm, needle
+    fb = text(next(p for p in KT if p.name == "ClientFallback.kt"))
+    assert "ApiFailure.Offline" in fb and "ApiFailure.Timeout" in fb and "AiMode.Cloud" in fb
+
+
+def test_state_and_notice_labels_are_honest_and_translated():
+    az, en = strings_of("values"), strings_of("values-en")
+    assert "NOT CONFIGURED" in az["ai_state_not_configured"] and "SİMULYASİYA" in az["ai_state_simulation"]
+    assert "NOT CONFIGURED" in en["ai_state_not_configured"] and "SIMULATION" in en["ai_state_simulation"]
+    for code in ("fallback", "consent_required", "simulation_only", "all_unavailable", "cloud_unavailable", "local_unavailable",
+                 "unsupported_locally", "blocked", "blocked_egress", "in_progress", "bad_request", "device_fallback"):
+        assert f"notice_{code}" in az, code
+    uitext = text(next(p for p in KT if p.name == "UiText.kt"))
+    assert "notice_" in uitext

@@ -181,8 +181,15 @@ class ApiClient(private val store: TokenStore, private val timeouts: ApiTimeouts
 
     suspend fun status(): SystemStatus = call("GET", "/v1/system/status", null, SystemStatus.serializer())
 
-    suspend fun sendMessage(text: String, conversationId: String?): ChatResponse =
-        call("POST", "/v1/chat/messages", json.encodeToString(ChatRequest.serializer(), ChatRequest(text, conversationId)), ChatResponse.serializer())
+    /** `clientRequestId` verilərsə sorğu idempotentdir: şəbəkə təkrarı eyni cavabı qaytarır (ikiqat icra/mesaj yoxdur). */
+    suspend fun sendMessage(text: String, conversationId: String?, clientRequestId: String? = null): ChatResponse =
+        call("POST", "/v1/chat/messages",
+            json.encodeToString(ChatRequest.serializer(), ChatRequest(text, conversationId, clientRequestId)), ChatResponse.serializer())
+
+    suspend fun aiStatus(): AiStatus = call("GET", "/v1/ai/status", null, AiStatus.serializer())
+
+    suspend fun setAiMode(mode: AiMode): AiModeResponse =
+        call("POST", "/v1/ai/mode", json.encodeToString(AiModeRequest.serializer(), AiModeRequest(mode.wire)), AiModeResponse.serializer())
 
     suspend fun sendTranscript(text: String, confidence: Double, conversationId: String?): ChatResponse =
         call("POST", "/v1/voice/transcripts",

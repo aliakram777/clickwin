@@ -1,7 +1,7 @@
 # CLAUDE.md — NAYMERA
 
 Agent sistemi: CEO agent + şöbə agentləri. Stack: Python 3.12, pytest, SQLite.
-Mərhələ 1-15 hazırdır (13-15: Android API, Keystore/biometrik imza ilə step-up, Kotlin/Compose layihəsi, JVM kontrakt sınağı; APK build EDİLMƏYİB — SDK/`dl.google.com` yoxdur; 7: Effect Broker; 8: təsdiq; 9: Tool Runtime; 10: LLM adapter — interfeys və mock; 11: yaddaş və virtual şirkət; 12: internet araşdırması, proaktiv zəka, Android-first interfeyslər). Əsas platforma: Android APK (Telegram əsas deyil): agent yaratma, təhlükəsizlik qapısı, reyestr, orkestrator, CEO agent, xərc kitabı, büdcə siyasəti, asılılıq qrafı və retry (bax: STATUS.md).
+Mərhələ 1-16 hazırdır (16: daimi hibrid AI — Cloud+Local, AUTO/CLOUD/LOCAL, real provayder/model/səs YOXDUR; 13-15: Android API, Keystore/biometrik imza ilə step-up, Kotlin/Compose layihəsi, JVM kontrakt sınağı; APK build EDİLMƏYİB — SDK/`dl.google.com` yoxdur; 7: Effect Broker; 8: təsdiq; 9: Tool Runtime; 10: LLM adapter — interfeys və mock; 11: yaddaş və virtual şirkət; 12: internet araşdırması, proaktiv zəka, Android-first interfeyslər). Əsas platforma: Android APK (Telegram əsas deyil): agent yaratma, təhlükəsizlik qapısı, reyestr, orkestrator, CEO agent, xərc kitabı, büdcə siyasəti, asılılıq qrafı və retry (bax: STATUS.md).
 
 ## Mütləq qaydalar
 
@@ -26,7 +26,8 @@ Mərhələ 1-15 hazırdır (13-15: Android API, Keystore/biometrik imza ilə ste
    Alətlər yalnız `ToolRuntime` ilə (qeydiyyatlı allowlist, `@tool_handler`); shell/şəbəkə/sistem/env alətləri defoltda bağlıdır və yalnız təsdiqlənmiş OS sandbox adapteri ilə mümkündür. In-process məhdudiyyətləri OS sandbox kimi təqdim etmə.
    Həssas effektlər `ApprovalService` ilə təsdiqlənir: agentlər/broker `ApprovalGateway`-ə (approve/deny) çıxış almır; testdəki mock təsdiqi (`kind="mock"`) real istifadəçi təsdiqi kimi təqdim olunmur.
 6. **API/Android:** `api/` modulları `safety.broker/gate/tools/workspace/ledger` import etmir və env/şəbəkə istifadə etmir; təsdiq yalnız cihazın Keystore açarı ilə biometrik imza (step-up) ilə — serverdə yalnız açıq açar, şəxsi açar/paylaşılan sirr yox (səs/söhbət mətni heç vaxt); Android backend-də olmayan imkanı (`/v1/capabilities`) işləyirmiş kimi göstərmir, mock rejimini açıq göstərir; APK-da API açarı olmaz; build edilmədiyi halda "APK hazırdır" demə; APK imzalama/yayımlama (açar, hesab, `signingConfigs`) sahib qərarı olmadan qurulmur.
-7. Soruşulmayan kod yazma: tapşırığın çərçivəsindən kənara çıxma.
+7. **Hibrid AI:** hər sorğuya yalnız bir mühərrik cavab verir (`request_id` ilə təkrar icra yoxdur); CLOUD rejimi səssiz Local-a keçmir; qurulmayan/simulyasiya mühərrik real imkan kimi göstərilmir; real Cloud `cloud_paid_use`, yaddaşın Cloud-a ötürülməsi `cloud_data_transfer`+məxfilik siyasəti, cihazda real model `local_resource_use` razılığı olmadan işləmir (razılıq vermək Keystore imzası ilə); sirr bənzər mətn Cloud-a getmir; mühərrik çıxışı etibarsızdır; `agents/hybrid.py` Broker/Gate/Approval/CEO/yaddaş-yazma import etmir; API açarı APK-da olmaz (`HYBRID_AI.md`).
+8. Soruşulmayan kod yazma: tapşırığın çərçivəsindən kənara çıxma.
 
 ## Əmrlər
 
@@ -45,6 +46,7 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 .
 ├── CLAUDE.md                  # bu fayl: qaydalar, əmrlər, xəritə
 ├── README.md                  # layihə təsviri
+├── HYBRID_AI.md               # hibrid AI arxitekturası, siyasətlər, lokal model araşdırması, məhdudiyyətlər
 ├── ROADMAP.md                 # məhsul yol xəritəsi: mərhələlər, arxitektura, təhlükəsizlik, Android-first, Builder planı
 ├── STATUS.md                  # cari vəziyyət (hər əhəmiyyətli işdən sonra yenilə)
 ├── requirements.txt           # iş vaxtı asılılıqları (pyyaml)
@@ -67,6 +69,9 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 │   ├── memory.py              # davamlı yaddaş (SQLite): yazma yalnız MemoryService; MemoryReader yalnız oxu; sirr yazılmır
 │   ├── company.py             # 8 departament, rol/səlahiyyət/büdcə, handoff (audit), nəticə birləşdirmə; view/admin üzləri
 │   ├── durable.py             # davamlı workflow + təhlükəsiz davam etdirmə (lease, plan hash, uzlaşdırma)
+│   ├── hybrid.py              # hibrid AI: Cloud/Local mühərrikləri, HybridRouter (AUTO/CLOUD/LOCAL), razılıq/məxfilik, request_id kitabı
+│   ├── local_models.py        # lokal model kataloqu (təxmini), ResourceGuard, yükləmə planı (yükləmə yoxdur)
+│   ├── voice.py               # səs: az/en/ru/tr, TTS/STT adapterləri, Local/Cloud ayrı
 │   ├── llm.py                 # LLMProvider interfeysi, Secret/konfiqurasiya (env), GuardedLLM limitləri, MockProvider
 │   ├── llm_planner.py         # LLM yalnız TƏKLİF: plan və agent təsviri (ciddi doğrulama); icra CEO/Broker ilə
 │   └── ceo.py                 # CEO: plan, bölgü, toplama, yoxlama, hesabat, run_workflow + retry
@@ -80,7 +85,7 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 ├── safety/tools.py            # Tool Runtime: allowlist, limitlər, SandboxAdapter interfeysi (real OS sandbox YOXDUR)
 ├── safety/workspace.py        # workspace fayl sərhədi (tətbiq səviyyəli) + fs.read/fs.write/fs.list
 ├── safety/ledger.py           # SQLite xərc kitabı: rezerv/təsdiq/azad, limitlər (data/ledger.db)
-└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration/workflow/retry/broker/approvals/approval_broker/workspace/tool_runtime/llm/llm_planner/memory/company/durable/research/proactive/mobile/api_http/api_auth/api_app/api_bootstrap/api_p256/android_integration/android_project/jvm_contract[opt-in])
+└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration/workflow/retry/broker/approvals/approval_broker/workspace/tool_runtime/llm/llm_planner/memory/company/durable/research/proactive/mobile/api_http/api_auth/api_app/api_bootstrap/api_p256/android_integration/android_project/jvm_contract[opt-in]/hybrid_router/hybrid_api/local_models/voice_registry)
 ```
 
 Yeni kod əlavə olunanda bu xəritəni yenilə.

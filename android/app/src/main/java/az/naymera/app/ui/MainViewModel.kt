@@ -5,6 +5,8 @@ import androidx.lifecycle.viewModelScope
 import az.naymera.app.R
 import az.naymera.app.data.AgentDto
 import az.naymera.app.data.ApiClient
+import az.naymera.app.data.AiMode
+import az.naymera.app.data.AiStatus
 import az.naymera.app.data.AppNotification
 import az.naymera.app.data.Capabilities
 import az.naymera.app.data.ConnectionState
@@ -24,6 +26,8 @@ data class HomeState(
     val loading: Boolean = false,
 )
 
+data class AiUiState(val status: AiStatus? = null, val error: UiText? = null)
+
 data class ListState<T>(val items: List<T> = emptyList(), val error: UiText? = null, val notice: UiText? = null)
 
 /** Backend-dən gələn məlumat: imkanlar, vəziyyət, bildirişlər, yaddaş, agentlər. Yaddaş/söhbət mətni etibarsız məlumatdır. */
@@ -36,7 +40,12 @@ class MainViewModel(private val api: ApiClient, private val sync: EventSync) : V
     val memory: StateFlow<ListState<MemoryRecord>> = _memory.asStateFlow()
     private val _agents = MutableStateFlow(ListState<AgentDto>())
     val agents: StateFlow<ListState<AgentDto>> = _agents.asStateFlow()
+    private val _ai = MutableStateFlow(AiUiState())
+    val ai: StateFlow<AiUiState> = _ai.asStateFlow()
     val connection: StateFlow<ConnectionState> = sync.state
+
+    /** Cari AI rejimi (son bilinən): söhbət fallback qərarı üçün. Bilinmirsə AUTO. */
+    val currentMode: AiMode get() = _ai.value.status?.aiMode() ?: AiMode.Auto
     private var syncJob: Job? = null
 
     fun refreshHome() {
@@ -46,6 +55,23 @@ class MainViewModel(private val api: ApiClient, private val sync: EventSync) : V
                 _home.value = HomeState(api.capabilities(), api.status())
             } catch (e: Exception) {
                 _home.value = _home.value.copy(loading = false, error = e.toUiText())
+            }
+        }
+    }
+
+    fun loadAi() {
+        viewModelScope.launch {
+            _ai.value = try { AiUiState(api.aiStatus()) } catch (e: Exception) { AiUiState(_ai.value.status, e.toUiText()) }
+        }
+    }
+
+    fun setMode(mode: AiMode) {
+        viewModelScope.launch {
+            try {
+                api.setAiMode(mode)
+                _ai.value = AiUiState(api.aiStatus())
+            } catch (e: Exception) {
+                _ai.value = AiUiState(_ai.value.status, e.toUiText())
             }
         }
     }

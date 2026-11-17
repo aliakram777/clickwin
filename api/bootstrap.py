@@ -9,6 +9,7 @@ from typing import Any
 from agents.ceo import CEO, RulePlanner
 from agents.company import Company
 from agents.durable import DurableRunner, WorkflowStore
+from agents.hybrid import AiStore, CloudEngine, HybridRouter, LocalEngine, RoutedLLM
 from agents.llm import GuardedLLM, LLMConfig, MockProvider
 from agents.llm_planner import LLMPlanner
 from agents.memory import MemoryService
@@ -19,7 +20,7 @@ from agents.proactive import NotificationPolicy, ProactiveAnalyzer, ProactiveEng
 from agents.registry import Registry
 from api.app import ApiApp
 from api.auth import AuthService
-from api.chat import ChatService, ConversationStore, RuleAssistant
+from api.chat import ChatService, ConversationStore, HybridReplyEngine, RuleAssistant
 from api.events import ApprovalEventChannel
 from api.jobs import JobService
 from safety.approvals import ApprovalService
@@ -38,6 +39,7 @@ class Services:
     company: Company
     memory: MemoryService
     events: EventStore
+    router: HybridRouter
     data_dir: Path
 
 
@@ -63,11 +65,14 @@ def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: fl
         NotificationStore(d / "notifications.db"), NotificationPolicy())
     llm = GuardedLLM(MockProvider(default="Mock cavab: real LLM qoşulmayıb."), LLMConfig(provider="mock"),
                      log_path=d / "llm.jsonl", stop_path=stop)
-    jobs = JobService(LLMPlanner(llm, company.view.department_costs()), durable, d / "jobs.db")
-    chat = ChatService(ConversationStore(d / "chat.db"),
-                       RuleAssistant(lambda: {"pending_approvals": len(approvals.reader.pending())}))
+    # Hibrid AI: Cloud (burada MOCK: real provayder/açar qoşulmayıb) və Local (model yoxdur: NOT CONFIGURED). Rejim: AUTO.
+    router = HybridRouter(CloudEngine(llm), LocalEngine(None), AiStore(d / "ai.db"), stop_path=stop)
+    jobs = JobService(LLMPlanner(RoutedLLM(router), company.view.department_costs()), durable, d / "jobs.db")
+    rules = RuleAssistant(lambda: {"pending_approvals": len(approvals.reader.pending())})
+    chat = ChatService(ConversationStore(d / "chat.db"), HybridReplyEngine(
+        router, lambda: memory.reader.search("", category="note", limit=3), rules, allow_simulated=False))
     auth = AuthService(d / "auth.db", audit, owner_id=owner_id)
     app = ApiApp(auth=auth, chat=chat, events=events, stop_path=stop, gateway=approvals.gateway,
                  reader=approvals.reader, memory=memory, company=company.view, proactive=proactive, jobs=jobs,
-                 voice=MockVoiceSynthesizer(), owner_id=owner_id, audit_path=audit, llm_is_mock=True, https=https)
-    return Services(app, auth, approvals, company, memory, events, d)
+                 voice=MockVoiceSynthesizer(), owner_id=owner_id, audit_path=audit, llm_is_mock=True, https=https, ai=router)
+    return Services(app, auth, approvals, company, memory, events, router, d)

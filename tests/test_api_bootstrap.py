@@ -73,3 +73,28 @@ def test_server_binds_to_loopback_by_default_and_refuses_open_binds_without_tls(
     check_bind("0.0.0.0", tls_cert="/x/cert.pem", tls_key="/x/key.pem")
     with pytest.raises(ValueError):
         check_bind("0.0.0.0", tls_cert="/x/cert.pem")
+
+
+def test_default_stack_has_a_hybrid_router_with_honest_engine_states(tmp_path):
+    svc = build_app(tmp_path)
+    code = svc.auth.create_pairing_code()
+    tok = wsgi(svc.app, "POST", "/v1/pair", pair_body(code))[1]["access_token"]
+    st = wsgi(svc.app, "GET", "/v1/ai/status", token=tok)[1]
+    assert st["mode"] == "auto"
+    assert st["cloud"]["state"] == "simulation" and st["cloud"]["is_mock"] is True
+    assert st["local"]["state"] == "not_configured"
+    assert all(v is False for v in st["consents"].values())
+    assert st["voice"]["tts"]["local"] == "simulation" and st["voice"]["stt"]["local"] == "not_configured"
+    chat = wsgi(svc.app, "POST", "/v1/chat/messages", {"text": "salam"}, token=tok)[1]["assistant_message"]
+    assert chat["provenance"] == "rules" and chat["engine"] == "" and "simulyasiya" in chat["notice"].lower()   # simulyasiya real AI kimi göstərilmir
+    assert chat["notice_code"] == "simulation_only"
+    assert wsgi(svc.app, "GET", "/v1/system/status", token=tok)[1]["llm_is_mock"] is True
+    assert wsgi(svc.app, "GET", "/v1/capabilities", token=tok)[1]["backend_mode"] == "mock"
+
+
+def test_ai_settings_persist_across_restarts(tmp_path):
+    svc = build_app(tmp_path)
+    tok = wsgi(svc.app, "POST", "/v1/pair", pair_body(svc.auth.create_pairing_code()))[1]["access_token"]
+    assert wsgi(svc.app, "POST", "/v1/ai/mode", {"mode": "local"}, token=tok)[0] == 200
+    again = build_app(tmp_path)
+    assert wsgi(again.app, "GET", "/v1/ai/status", token=tok)[1]["mode"] == "local"

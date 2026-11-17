@@ -130,7 +130,7 @@ def world(tmp_path):
         NotificationStore(tmp_path / "notif.db", clock=clock), NotificationPolicy(), clock=clock)
     auth = AuthService(tmp_path / "auth.db", audit, clock=clock, owner_id="owner", access_ttl=7200)
 
-    def build(plan=PLAN_OPS, allow_sensitive=False, engine=None, voice=True):
+    def build(plan=PLAN_OPS, allow_sensitive=False, engine=None, voice=True, ai=None, voice_registry=None):
         provider = MockProvider(default=plan)
         client = GuardedLLM(provider, LLMConfig(provider="mock", max_response_chars=5000),
                             log_path=tmp_path / "llm.jsonl", stop_path=stop)
@@ -141,7 +141,7 @@ def world(tmp_path):
         app = ApiApp(auth=auth, chat=chat, events=events, stop_path=stop, gateway=svc.gateway, reader=svc.reader,
                      memory=memory, company=company.view, proactive=pro, jobs=jobs,
                      voice=MockVoiceSynthesizer() if voice else None, owner_id="owner", clock=clock,
-                     audit_path=audit, llm_is_mock=True)
+                     audit_path=audit, llm_is_mock=True, ai=ai, voice_registry=voice_registry)
         return app
 
     class W:
