@@ -36,7 +36,7 @@ def verify(
 ) -> VerifyResult:
     result = _run(spec, task, runner)
     if not result.ok:
-        _log_error(Path(errors_path), spec.name, task.name, result)
+        log_error(Path(errors_path), spec.name, task.name, result)
     return result
 
 
@@ -70,7 +70,7 @@ def _run(spec: AgentSpec, task: VerifyTask, runner: Runner) -> VerifyResult:
     return VerifyResult(True)
 
 
-def _log_error(path: Path, agent: str, task: str, result: VerifyResult) -> None:
+def log_error(path: Path, agent: str, task: str, result: VerifyResult) -> None:
     row = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "agent": agent,

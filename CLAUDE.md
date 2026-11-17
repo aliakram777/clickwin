@@ -1,7 +1,7 @@
 # CLAUDE.md — NAYMERA
 
 Agent sistemi: CEO agent + şöbə agentləri. Stack: Python 3.12, pytest, SQLite.
-Mərhələ 1 hazırdır: agent yaratma modulu + təhlükəsizlik qapısı (bax: STATUS.md).
+Mərhələ 1-2 hazırdır: agent yaratma, təhlükəsizlik qapısı, reyestr, orkestrator (bax: STATUS.md).
 
 ## Mütləq qaydalar
 
@@ -48,9 +48,11 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 ├── agents/
 │   ├── spec.py                # AgentSpec (YAML) + doğrulama
 │   ├── factory.py             # məqsəddən təsvir (LLM interfeysi, MockLLM)
-│   └── verify.py              # test tapşırığı ilə yoxlama -> logs/errors.jsonl
+│   ├── verify.py              # test tapşırığı ilə yoxlama -> logs/errors.jsonl
+│   ├── registry.py            # SQLite agent reyestri (data/naymera.db)
+│   └── orchestrator.py        # şöbəyə yönləndirmə; icra yalnız gate ilə
 ├── safety/gate.py             # icazə, xərc limiti, təsdiq, audit, stop
-└── tests/                     # pytest testləri (test_spec/factory/verify/gate)
+└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator)
 ```
 
 Yeni kod əlavə olunanda bu xəritəni yenilə.

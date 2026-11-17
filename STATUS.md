@@ -3,7 +3,7 @@
 Yenilənib: 2026-11-17
 
 ## Cari mərhələ
-Mərhələ 1 — agent yaratma modulu (tamamlandı, PR təsdiq gözləyir).
+Mərhələ 2 — reyestr və orkestrator (tamamlandı, PR təsdiq gözləyir). Mərhələ 1: PR #1.
 
 ## Hazırdır
 - Qurulum: README, CLAUDE.md, .gitignore, skill-lər (`test-gate`, `safety-layer`), CI
@@ -11,17 +11,20 @@ Mərhələ 1 — agent yaratma modulu (tamamlandı, PR təsdiq gözləyir).
 - `agents/factory.py` — məqsəd mətnindən təsvir; LLM interfeysi (Protocol), hələlik `MockLLM`
 - `agents/verify.py` — test tapşırığı ilə yoxlama; uğursuzluq `logs/errors.jsonl`-ə
 - `safety/gate.py` — icazə siyahısı, xərc limiti, təsdiq qapısı (pul/xarici hesab/nəşr təsdiqsiz bloklanır), audit `logs/audit.jsonl`, stop bayrağı
-- Testlər: `tests/test_spec.py`, `test_factory.py`, `test_verify.py`, `test_gate.py`
+- `agents/registry.py` — SQLite-da agent təsvirləri + şöbə: əlavə et, oxu, yenilə, siyahı
+- `agents/orchestrator.py` — tapşırığı şöbə agentinə yönləndirir; hər icra `Gate` yoxlamasından keçir (icazə, limit, təsdiq, stop); xəta `logs/errors.jsonl`-ə
+- Testlər: `tests/test_{spec,factory,verify,gate,registry,orchestrator}.py` (80 test)
 
 ## Məhdudiyyətlər
 - Real LLM çağırışı yoxdur (yalnız mock); real API açarı və xarici çağırış istifadə olunmayıb.
-- `verify` agenti `runner` funksiyası ilə işlədir; real agent icra mühiti hələ yoxdur.
-- Gate hələ agent icrasına qoşulmayıb (ayrıca modul).
+- `runner` funksiyadır (mock); real agent icra mühiti və LLM hələ yoxdur.
+- Yönləndirmə sadədir: şöbə + giriş uyğunluğu + icazə; CEO agent hələ yoxdur.
+- Xərc sayğacı orkestrator yaddaşındadır (proses yenidən başlayanda sıfırlanır).
 
 ## Növbəti addımlar (təsdiq gözləyir)
-- CEO agentin və şöbə agentlərinin dizaynı
-- SQLite sxemi
-- Gate-in agent icrasına qoşulması
+- CEO agent (şöbələr arası yönləndirmə, planlama)
+- Xərc sayğacının SQLite-da saxlanması
+- Real icra mühiti (sandbox) və LLM interfeysi
 
 ## Qeyd
 Bu bölmədə gəlir/qazanc haqqında iddia yazılmır.
