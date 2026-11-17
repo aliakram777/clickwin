@@ -41,7 +41,7 @@ class RulePlanner:
 @dataclass(frozen=True)
 class StepReport:
     department: str
-    status: str  # ok | blocked | unrouted | error | failed_check | skipped
+    status: str  # ok | blocked | unrouted | error | duplicate | failed_check | skipped
     agent: str = ""
     output: Any = None
     reason: str = ""
@@ -93,7 +93,7 @@ class CEO:
         self.budget = float(budget)
         self.checks = dict(checks or {})
 
-    def run(self, goal: str) -> JobReport:
+    def run(self, goal: str, job_id: str | None = None) -> JobReport:
         steps = self.planner.plan(goal) if goal and goal.strip() else []
         if not steps:
             return JobReport(goal, "no_plan", reason="uyğun şöbə tapılmadı")
@@ -103,22 +103,23 @@ class CEO:
                              reason=f"plan büdcəni aşır: {total:.4f} > {self.budget:.4f}")
 
         reports: list[StepReport] = []
-        for step in steps:
+        for i, step in enumerate(steps):
             if self._stopped():
                 reports.append(StepReport(step.department, "skipped", reason="stop bayrağı aktivdir"))
                 continue
-            reports.append(self._dispatch(goal, step))
+            op_id = f"{job_id}:{i}:{step.department}" if job_id else ""
+            reports.append(self._dispatch(goal, step, op_id))
 
         good = sum(r.status == "ok" for r in reports)
         status = "ok" if good == len(reports) else "partial" if good else "failed"
         return JobReport(goal, status, tuple(reports))
 
-    def _dispatch(self, goal: str, step: Rule) -> StepReport:
+    def _dispatch(self, goal: str, step: Rule, op_id: str = "") -> StepReport:
         agents = self.orchestrator.registry.list(step.department)
         # Şöbə agentlərinin elan etdiyi girişlər məqsəd mətni ilə doldurulur.
         inputs = {k: goal for a in agents for k in a.spec.inputs}
         task = Task(step.department, inputs, step.permission, step.cost,
-                    description=f"ceo:{step.department}:{goal[:60]}")
+                    description=f"ceo:{step.department}:{goal[:60]}", op_id=op_id)
         result = self.orchestrator.execute(task)  # gate burada işləyir
         if result.status != "ok":
             return StepReport(step.department, result.status, result.agent, reason=result.reason)
