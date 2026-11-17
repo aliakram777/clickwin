@@ -81,6 +81,14 @@ class StepRecord:
 
 
 @dataclass(frozen=True)
+class JobInfo:
+    job_id: str
+    status: str
+    updated_at: float
+    lease_expires: float
+
+
+@dataclass(frozen=True)
 class StoredWorkflow:
     job_id: str
     goal: str
@@ -155,6 +163,13 @@ class WorkflowStore:
 
     def load(self, job_id: str) -> StoredWorkflow:
         return self._load(job_id)
+
+    def list_jobs(self, statuses: set[str] | None = None) -> list[JobInfo]:
+        """İşlərin yüngül siyahısı (plan və nəticələr yüklənmir): təhlil/bildiriş üçün."""
+        rows = self._conn.execute("SELECT job_id, status, updated_at, lease_expires FROM workflows "
+                                  "ORDER BY updated_at, job_id").fetchall()
+        return [JobInfo(r["job_id"], r["status"], float(r["updated_at"]), float(r["lease_expires"]))
+                for r in rows if statuses is None or r["status"] in statuses]
 
     def acquire(self, job_id: str) -> StoredWorkflow:
         """İşi davam etdirmək üçün lease alır (atomik). Başqası işləyirsə WorkflowBusy."""
