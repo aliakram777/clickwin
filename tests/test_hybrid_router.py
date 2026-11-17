@@ -34,7 +34,7 @@ class Fake:
         self._state, self.is_mock = state, is_mock
         self.script = list(script if script is not None else ["cavab-" + kind])
         self.kinds, self.complexities, self.languages, self.consent = kinds, complexities, languages, tuple(consent)
-        self.calls, self.prompts, self.gate = 0, [], None
+        self.calls, self.prompts, self.systems, self.gate = 0, [], [], None
 
     def status(self):
         return EngineStatus(self.kind, self.name, self._state, self.is_mock, reason="" if self._state in ("ready", "simulation") else self._state,
@@ -55,6 +55,7 @@ class Fake:
     def generate(self, prompt, system, request_id):
         self.calls += 1
         self.prompts.append(prompt)
+        self.systems.append(system)
         if self.gate is not None:
             self.gate.wait(5)
         item = self.script.pop(0) if len(self.script) > 1 else self.script[0]

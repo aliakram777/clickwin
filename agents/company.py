@@ -300,6 +300,71 @@ class CompanyAdmin:
                 permissions=sorted(authority.permissions), budget=float(budget), **c.marks(principal))
         return CompanyView(c).get(spec.name)
 
+    def register_baseline_agent(self, spec: AgentSpec, department: str, role: str, principal: Principal) -> CompanyAgent:
+        """MƏHDUD agent qeydiyyatı: səlahiyyət HƏMİŞƏ {read_files} ∩ spec, həssas icazə yox, ötürmə yox, tapşırıq/büdcə 0. Sistem (NAYMERA) və sahib
+        çağıra bilər; agent çağıra bilməz. Genişləndirmə yalnız sahib tərəfindən (`set_authority`/`set_budget`)."""
+        c = self._core
+        op = "register_baseline_agent"
+        c.authorize(principal, op, expansion=False)
+        if department not in DEPARTMENTS:
+            raise c.reject(op, "unknown_department", f"naməlum şöbə: {department}", principal)
+        role = _clean_role(role)
+        if not role:
+            raise c.reject(op, "role", "rol boş ola bilməz", principal)
+        if c._row(spec.name) is not None:
+            raise c.reject(op, "exists", "agent artıq şirkətdə mövcuddur", principal)
+        authority = Authority(frozenset({"read_files"} & set(spec.permissions)), False, frozenset(), 0.0)
+        c.validate(op, spec, authority, 0.0)
+        eff = c.effective(spec, authority, 0.0)
+        try:
+            c.registry.add(eff, department)
+        except RegistryError as exc:
+            raise c.reject(op, "exists", str(exc), principal) from None
+        now = c.now()
+        c.conn.execute(
+            "INSERT INTO company_agents (name, department, role, spec_yaml, permissions_json, sensitive_ok, "
+            "delegate_json, max_task_cost, budget, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, 0, '[]', 0.0, 0.0, 'active', ?, ?)",
+            (spec.name, department, role, spec.to_yaml(), json.dumps(sorted(authority.permissions)), now, now))
+        c.audit("company_baseline_registered", agent=spec.name, department=department, role=role,
+                permissions=sorted(authority.permissions), budget=0.0, **c.marks(principal))
+        return CompanyView(c).get(spec.name)
+
+    def suspend(self, name: str, principal: Principal) -> CompanyAgent:
+        """Geri qaytarıla bilən dayandırma: effektiv icazələr boşaldılır, səlahiyyət/büdcə saxlanılır. Sistem və ya sahib (azaltma)."""
+        c = self._core
+        op = "suspend"
+        row = c._row(name)
+        if row is None:
+            raise c.reject(op, "unknown_agent", "agent tapılmadı", principal)
+        c.authorize(principal, op, expansion=False)
+        agent = c._agent(row)
+        if agent.status != "active":
+            raise c.reject(op, "not_active", "yalnız aktiv agent dayandırıla bilər", principal)
+        status = "suspended_owner" if principal.kind in ("human", "mock") else "suspended_system"
+        c.registry.update(c.effective(agent.spec, agent.authority, agent.budget, retired=True))
+        c.conn.execute("UPDATE company_agents SET status = ?, updated_at = ? WHERE name = ?", (status, c.now(), name))
+        c.audit("company_agent_suspended", agent=name, status=status, **c.marks(principal))
+        return CompanyView(c).get(name)
+
+    def resume(self, name: str, principal: Principal) -> CompanyAgent:
+        """Əvvəlki səlahiyyəti BƏRPA edir (yeni səlahiyyət vermir). Sahibin dayandırdığını yalnız sahib davam etdirə bilər."""
+        c = self._core
+        op = "resume"
+        row = c._row(name)
+        if row is None:
+            raise c.reject(op, "unknown_agent", "agent tapılmadı", principal)
+        c.authorize(principal, op, expansion=False)
+        agent = c._agent(row)
+        if agent.status not in ("suspended_system", "suspended_owner"):
+            raise c.reject(op, "not_suspended", "agent dayandırılmayıb (və ya fəaliyyətdən çıxarılıb)", principal)
+        if agent.status == "suspended_owner" and principal.kind not in ("human", "mock"):
+            raise c.reject(op, "owner_suspended", "sahibin dayandırdığı agenti yalnız sahib davam etdirə bilər", principal)
+        c.registry.update(c.effective(agent.spec, agent.authority, agent.budget))
+        c.conn.execute("UPDATE company_agents SET status = 'active', updated_at = ? WHERE name = ?", (c.now(), name))
+        c.audit("company_agent_resumed", agent=name, **c.marks(principal))
+        return CompanyView(c).get(name)
+
     def set_authority(self, name: str, authority: Authority, principal: Principal) -> CompanyAgent:
         c = self._core
         op = "set_authority"

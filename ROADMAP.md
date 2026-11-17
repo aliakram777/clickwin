@@ -1,6 +1,6 @@
 # NAYMERA — Məhsul yol xəritəsi
 
-Tarix: 2026-11-17 · Əsas: `claude/stage12-research-intelligence` (mərhələ 1–12; Mərhələ 13–16 üzərində işlənir; PR #1–#12 zəncirvari açıqdır, birləşdirilməyib).
+Tarix: 2026-11-17 · Əsas: `claude/stage12-research-intelligence` (mərhələ 1–12; Mərhələ 13–17 üzərində işlənir; PR #1–#12 zəncirvari açıqdır, birləşdirilməyib).
 
 Bu sənəd plandır, vədi yox. Gəlir, qazanc və ya gəlirli nəticə haqqında heç bir iddia yoxdur; trading itkiyə səbəb ola bilər
 (bax: bölmə 6).
@@ -217,3 +217,8 @@ Android (səs/mətn) → tapşırıq qəbulu → spesifikasiya və plan (LLM TƏ
 - Cloud və Local mühərrikləri ortaq interfeysdə, AUTO/CLOUD/LOCAL, təhlükəsiz fallback, təkrar icranın qarşısı, razılıq və məxfilik, ortaq oxu-yaddaş — **hazırdır və testlənib (927 Python testi, 34 Kotlin JVM testi)**; ətraflı `HYBRID_AI.md`.
 - Real Cloud provayderi, real lokal model və real səs **yoxdur** (simulation/not_configured). APK build edilməyib; Android UI kodu cihazda sınanmayıb.
 - Növbəti (hamısı sahib qərarı/razılığı ilə): Cloud provayderi adapteri (açar yalnız serverin env-ində, ödənişli istifadədən əvvəl razılıq), lokal modelin ölçülməsi (az/tr/ru keyfiyyəti) və cihaz/server runtime-ı, real səs, Android razılıq ekranı.
+
+## Mərhələ 17 — Real AI runtime və avtonom agent fabrikası (status)
+- Agent fabriki (8 rol, məhdud yaradılış, həyat dövrü, icazə sorğusu, agentlərarası ötürmə), icra qatı (Orchestrator/Broker/Gate/Təsdiq üzərində), çoxagentli plan/icra/yekun məhsul, builder interfeysləri (NOT CONFIGURED), real provayder adapteri (fake nəqliyyat/loopback ilə sınanıb) — **hazırdır və testlənib (1077 Python testi)**; ətraflı `AGENT_FACTORY.md`.
+- Real provayder/model/alət/nəşr **yoxdur**; agentlər yalnız mətn qaralaması istehsal edir; APK build edilməyib.
+- Növbəti (hamısı sahib qərarı/razılığı ilə): real provayderlə (sahibin açarı, büdcə limiti) uyğunluq sınağı, `ToolRuntime` ilə agent alətləri (fayl/test), Website Builder-in ilk real versiyası (yalnız yerli önbaxış), API/Android agent idarəetmə ekranı (step-up ilə), real səs.

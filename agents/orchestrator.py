@@ -24,6 +24,7 @@ class Task:
     description: str = ""
     op_id: str = ""  # verilibsə: eyni op_id yalnız bir dəfə icra və hesablanır
     approval_id: str = ""  # sahib təsdiqlədikdən sonra eyni tapşırığı göndərərkən (istəyə bağlı)
+    agent: str = ""  # verilibsə: yalnız bu adlı agent (şöbədə) seçilir; boşdursa köhnə yönləndirmə
 
 
 @dataclass(frozen=True)
@@ -86,7 +87,7 @@ class Orchestrator:
     def _route(self, task: Task) -> RegisteredAgent | None:
         candidates = [
             a for a in self.registry.list(task.department)
-            if all(k in task.input for k in a.spec.inputs)
+            if all(k in task.input for k in a.spec.inputs) and (not task.agent or a.spec.name == task.agent)
         ]
         for agent in candidates:  # icazəsi olan agent üstündür
             if task.permission in agent.spec.permissions:
