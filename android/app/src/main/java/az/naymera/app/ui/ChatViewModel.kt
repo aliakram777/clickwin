@@ -2,8 +2,8 @@ package az.naymera.app.ui
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import az.naymera.app.R
 import az.naymera.app.data.ApiClient
-import az.naymera.app.data.ApiException
 import az.naymera.app.data.ChatMessage
 import az.naymera.app.voice.SpeechToText
 import az.naymera.app.voice.VoiceProfile
@@ -16,7 +16,7 @@ data class ChatUiState(
     val conversationId: String? = null,
     val messages: List<ChatMessage> = emptyList(),
     val sending: Boolean = false,
-    val error: String? = null,
+    val error: UiText? = null,
 )
 
 /** Söhbət mətni (yazı və ya səs transkripti) serverə etibarsız giriş kimi göndərilir; bu sinif heç nəyi təsdiq/icra etmir. */
@@ -39,10 +39,8 @@ class ChatViewModel(private val api: ApiClient, private val stt: SpeechToText) :
                     messages = _state.value.messages + r.userMessage + r.assistantMessage,
                     sending = false,
                 )
-            } catch (e: ApiException) {
-                _state.value = _state.value.copy(sending = false, error = e.message)
             } catch (e: Exception) {
-                _state.value = _state.value.copy(sending = false, error = "Əlaqə xətası")
+                _state.value = _state.value.copy(sending = false, error = e.toUiText())
             }
         }
     }
@@ -50,7 +48,7 @@ class ChatViewModel(private val api: ApiClient, private val stt: SpeechToText) :
     /** Səsli giriş: real STT qoşulmayıbsa (simulyasiya) heç nə göndərilmir. */
     fun listen() {
         if (!stt.available) {
-            _state.value = _state.value.copy(error = "Səs tanıma hələ qoşulmayıb (simulyasiya).")
+            _state.value = _state.value.copy(error = UiText(R.string.chat_voice_unavailable))
             return
         }
         viewModelScope.launch {
@@ -62,7 +60,7 @@ class ChatViewModel(private val api: ApiClient, private val stt: SpeechToText) :
                     messages = _state.value.messages + r.userMessage + r.assistantMessage,
                 )
             } catch (e: Exception) {
-                _state.value = _state.value.copy(error = "Əlaqə xətası")
+                _state.value = _state.value.copy(error = e.toUiText())
             }
         }
     }
@@ -72,7 +70,7 @@ class ChatViewModel(private val api: ApiClient, private val stt: SpeechToText) :
             try {
                 _state.value = ChatUiState(conversationId, api.messages(conversationId))
             } catch (e: Exception) {
-                _state.value = _state.value.copy(error = "Tarixçə yüklənmədi")
+                _state.value = _state.value.copy(error = e.toUiText())
             }
         }
     }

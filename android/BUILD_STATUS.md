@@ -1,5 +1,7 @@
 # NAYMERA Android — build statusu
 
+Son yoxlama (Mərhələ 14): `ANDROID_HOME`/`ANDROID_SDK_ROOT` boşdur, `sdkmanager` və `adb` yoxdur, `dl.google.com` əlçatmazdır (HTTP 000). JDK və Gradle var, lakin Android Gradle Plugin və AndroidX Google Maven-dən gəlir.
+
 **APK build EDİLMƏYİB.** Bu mühitdə Android SDK yoxdur (`ANDROID_HOME`, `sdkmanager` yoxdur) və Google Maven
 (`dl.google.com`) əlçatan deyil; Gradle asılılıqları yüklənə bilmir. Buna görə:
 
@@ -22,6 +24,6 @@ Release APK imzasızdır; imzalama açarı repoda saxlanılmır və sahib tərə
 
 - Real səs tanıma və sintez YOXDUR: `MockSpeech` simulyasiyadır (`isMock=true`, UI-da "SİMULYASİYA").
 - Push (FCM) yoxdur; hadisələr qısa sorğulama ilə alınır.
-- Step-up: cihaz sirri `EncryptedSharedPreferences`-dədir və HMAC sübutu biometrik açılışdan sonra hesablanır; açılış tətbiq
-  səviyyəlidir (Keystore açarına bağlı kriptoqrafik biometrik məhdudiyyət sonrakı mərhələdir). Server də həmin sirri saxlayır.
+- Step-up: imza açarı Android Keystore-dadır (P-256, hər imza üçün güclü biometrik, yeni barmaq izində etibarsız olur), serverdə yalnız açıq açar var. Bu kod real cihazda/emulyatorda SINANMAYIB; Keystore/BiometricPrompt davranışı (StrongBox, qəribə OEM cihazlar, biometrik qeydiyyatı olmayan cihaz) yoxlanılmalıdır. Biometrik qeydiyyatı olmayan cihazda cütləşmə və təsdiq bloklanır (cihaz kilidi ilə əvəzləmə yoxdur).
+- Python inteqrasiya testləri Android kodunu İCRA ETMİR: yalnız eyni HTTP müqaviləsini istinad müştərisi ilə yoxlayır.
 - UI cihazda yoxlanılmayıb (ekran görüntüsü, işləmə testi yoxdur).

@@ -7,7 +7,7 @@ import ipaddress
 import ssl
 from wsgiref.simple_server import WSGIRequestHandler, make_server
 
-from api.bootstrap import build_app
+from api.bootstrap import Services, build_app
 from api.http import wsgi_adapter
 
 DEFAULT_HOST = "127.0.0.1"
@@ -31,20 +31,30 @@ def check_bind(host: str, tls_cert: str | None = None, tls_key: str | None = Non
 
 
 class _QuietHandler(WSGIRequestHandler):
+    timeout = 15  # donmuş/yavaş müştəri tək-axınlı serveri uzun müddət bloklamasın
+
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002 — sorğu sətri (token ola bilər) loqlanmır
         return
 
 
-def serve(data_dir: str, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, tls_cert: str | None = None,
-          tls_key: str | None = None) -> None:
+def create_server(svc: Services, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, tls_cert: str | None = None,
+                  tls_key: str | None = None, request_timeout: float = 15):
+    """Serveri qurur (başlatmır). Açıq interfeys yalnız TLS ilə; sorğu vaxt aşımı məcburidir."""
     check_bind(host, tls_cert, tls_key)
-    svc = build_app(data_dir, https=bool(tls_cert))
-    httpd = make_server(host, port, wsgi_adapter(svc.app), handler_class=_QuietHandler)
+    handler = type("Handler", (_QuietHandler,), {"timeout": request_timeout})
+    httpd = make_server(host, port, wsgi_adapter(svc.app), handler_class=handler)
     if tls_cert and tls_key:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.load_cert_chain(tls_cert, tls_key)
         httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+    return httpd
+
+
+def serve(data_dir: str, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, tls_cert: str | None = None,
+          tls_key: str | None = None) -> None:
+    check_bind(host, tls_cert, tls_key)
+    httpd = create_server(build_app(data_dir, https=bool(tls_cert)), host, port, tls_cert, tls_key)
     try:
         httpd.serve_forever()
     finally:

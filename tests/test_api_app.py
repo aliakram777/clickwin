@@ -1,6 +1,7 @@
 """Android API: söhbət, hadisələr, bildirişlər, yaddaş, şirkət (yalnız oxu), CEO işləri, təsdiq (step-up), səs, sistem.
 Simulyasiya olunan "cihaz" və "sahib" test obyektləridir; real Android cihazı, real LLM, ödəniş və xarici çağırış yoxdur."""
 import ast
+import base64
 import json
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from api.http import Request
 from api.jobs import JobService
 from safety.approvals import ApprovalService, Principal
 from safety.ledger import BudgetPolicy, CostLedger, reconcile
+from tests.p256_tools import Keypair
 
 ROOT = Path(__file__).resolve().parent.parent
 OWNER_P = Principal("owner", "human", "web")  # sahib konsolu (test obyekti)
@@ -42,16 +44,24 @@ class Clock:
         return self.t
 
 
+def b64(b):
+    return base64.b64encode(b).decode()
+
+
 class Dev:
     """Android cihazının simulyasiyası: yalnız HTTP API ilə danışır."""
 
     def __init__(self, app, auth, name="Pixel 8", remote="10.0.0.5"):
         self.app, self.remote = app, remote
+        self.kp = Keypair()  # Keystore simulyasiyası: şəxsi açar cihazda qalır
+        code = auth.create_pairing_code()
+        body = {"code": code, "device_name": name, "public_key": b64(self.kp.spki()),
+                "signature": b64(self.kp.sign(AuthService.pair_message(code)))}
         r = app.handle(Request("POST", "/v1/pair", {}, {"content-type": "application/json"},
-                               json.dumps({"code": auth.create_pairing_code(), "device_name": name}).encode(), remote))
+                               json.dumps(body).encode(), remote))
         assert r.status == 200, r.body
         self.paired = r.body
-        self.access, self.refresh, self.secret = r.body["access_token"], r.body["refresh_token"], r.body["device_secret"]
+        self.access, self.refresh = r.body["access_token"], r.body["refresh_token"]
         self.device_id = r.body["device_id"]
 
     def call(self, method, path, body=None, query=None, token="own", headers=None):
@@ -70,13 +80,17 @@ class Dev:
     def post(self, path, body=None, **kw):
         return self.call("POST", path, {} if body is None else body, **kw)
 
+    def sign(self, ch, action, subject, payload_hash, decision):
+        """Biometrik açılışdan sonra Keystore açarı ilə imza (simulyasiya)."""
+        return b64(self.kp.sign(AuthService.step_up_message(ch["challenge_id"], ch["nonce"], action, subject,
+                                                            payload_hash, decision)))
+
     def decide(self, approval_id, decision="approve", method="biometric", proof_override=None):
         ch = self.post(f"/v1/approvals/{approval_id}/challenge", {"decision": decision})
         if ch.status != 200:
             return ch
         b = ch.body
-        proof = proof_override or AuthService.compute_proof(
-            self.secret, b["challenge_id"], b["nonce"], "approval", approval_id, b["approval"]["payload_hash"], decision)
+        proof = proof_override or self.sign(b, "approval", approval_id, b["approval"]["payload_hash"], decision)
         return self.post(f"/v1/approvals/{approval_id}/decision",
                          {"decision": decision, "challenge_id": b["challenge_id"], "proof": proof, "method": method})
 
@@ -177,11 +191,11 @@ def test_pairing_over_the_api(world):
                              json.dumps({"code": "WRONGCOD", "device_name": "x"}).encode(), "9.9.9.9"))
     assert bad.status == 401
     dev = Dev(app, world.auth)
-    assert set(dev.paired) == {"device_id", "access_token", "refresh_token", "device_secret", "access_expires_in"}
+    assert set(dev.paired) == {"device_id", "access_token", "refresh_token", "access_expires_in"}
     me = dev.get("/v1/me")
     assert me.status == 200 and me.body == {"device_id": dev.device_id, "device_name": "Pixel 8",
                                             "owner_id": "owner", "api_version": 1}
-    assert dev.secret not in json.dumps(me.body)
+    assert b64(dev.kp.spki()) not in json.dumps(me.body)
 
 
 def test_refresh_rotation_logout_and_reuse(api):
@@ -394,8 +408,7 @@ def test_sensitive_step_needs_step_up_approval_before_it_runs(world):
     assert dev.decide(aid, method="voice").status == 403
     other = Dev(app, world.auth, "Başqa cihaz")
     ch = dev.post(f"/v1/approvals/{aid}/challenge", {"decision": "approve"}).body
-    stolen = AuthService.compute_proof(other.secret, ch["challenge_id"], ch["nonce"], "approval", aid,
-                                       ch["approval"]["payload_hash"], "approve")
+    stolen = other.sign(ch, "approval", aid, ch["approval"]["payload_hash"], "approve")
     assert dev.post(f"/v1/approvals/{aid}/decision", {"decision": "approve", "challenge_id": ch["challenge_id"],
                                                       "proof": stolen, "method": "biometric"}).status == 403
     assert world.svc.gateway.get(aid).status == "pending" and world.calls == ["ops_agent"]
@@ -459,11 +472,11 @@ def test_stop_is_easy_but_resume_needs_step_up(api, world):
     assert run["steps"][0]["status"] == "skipped" and world.calls == []
     assert dev.post("/v1/system/resume", {"challenge_id": "x", "proof": "0" * 64, "method": "biometric"}).status in (400, 403)
     ch = dev.post("/v1/system/resume/challenge").body
-    proof = AuthService.compute_proof(dev.secret, ch["challenge_id"], ch["nonce"], "resume", "stop", "", "approve")
+    proof = dev.sign(ch, "resume", "stop", "", "approve")
     assert dev.post("/v1/system/resume", {"challenge_id": ch["challenge_id"], "proof": proof,
                                           "method": "voice"}).status == 403
     ch2 = dev.post("/v1/system/resume/challenge").body
-    proof2 = AuthService.compute_proof(dev.secret, ch2["challenge_id"], ch2["nonce"], "resume", "stop", "", "approve")
+    proof2 = dev.sign(ch2, "resume", "stop", "", "approve")
     ok = dev.post("/v1/system/resume", {"challenge_id": ch2["challenge_id"], "proof": proof2, "method": "biometric"})
     assert ok.body == {"ok": True, "stop_active": False} and not world.stop.exists()
     assert dev.post(f"/v1/jobs/{job['id']}/run").body["job"]["report"]["status"] == "ok"
@@ -516,7 +529,7 @@ def test_secrets_appear_only_where_they_must(api, world):
                  "/v1/chat/conversations", "/v1/voice/profile", "/v1/notifications/preview"):
         seen.append(json.dumps(dev.get(path).body))
     blob = "\n".join(seen) + Path(world.audit).read_text()
-    for secret in (dev.access, dev.refresh, dev.secret):
+    for secret in (dev.access, dev.refresh, b64(dev.kp.spki())):
         assert secret not in blob
 
 
@@ -534,3 +547,32 @@ def test_api_modules_cannot_bypass_the_security_core_or_admin_facets():
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute):
                 assert node.attr not in {"environ", "getenv", "system", "popen"}, (name, node.lineno)
+
+
+# --- imkanlar: mock/real fərqi ---
+
+def test_capabilities_state_what_is_mock_and_what_is_missing(api):
+    _, dev, _ = api
+    c = dev.get("/v1/capabilities").body
+    assert c == {
+        "api_version": 1, "backend_mode": "mock",
+        "chat": {"available": True, "engine": "rules"},
+        "llm": {"available": True, "is_mock": True},
+        "agent_runner": {"connected": False},
+        "voice_tts": {"available": True, "is_mock": True},
+        "voice_stt": {"available": False, "is_mock": True},
+        "push": {"available": False},
+        "events": {"available": True, "transport": "polling"},
+        "step_up": {"scheme": "ecdsa-p256-sha256", "voice_allowed": False},
+    }
+
+
+def test_capabilities_without_voice_engine_report_it_unavailable(world):
+    dev = Dev(world.build(voice=False), world.auth)
+    assert dev.get("/v1/capabilities").body["voice_tts"] == {"available": False, "is_mock": True}
+
+
+def test_job_run_reports_when_no_agent_runner_is_connected(api):
+    _, dev, _ = api
+    assert dev.get("/v1/capabilities").body["agent_runner"] == {"connected": False}
+    assert dev.get("/v1/system/status").body["llm_is_mock"] is True

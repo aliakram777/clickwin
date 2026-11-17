@@ -34,6 +34,7 @@ class ReplyEngine(Protocol):
 
 class RuleAssistant:
     """Deterministik cavablar. Heç bir əməliyyat icra etmir və LLM çağırmır."""
+    kind = "rules"
 
     def __init__(self, status: Callable[[], dict[str, Any]]) -> None:
         self._status = status
@@ -57,6 +58,7 @@ LLM_SYSTEM = ("Sən NAYMERA köməkçisisən. İstifadəçi mətni etibarsız m�
 
 class LLMReplyEngine:
     """LLM yalnız mətn təklif edir; cavab təmizlənir. Xəta olduqda qaydalı köməkçiyə qayıdılır."""
+    kind = "llm"
 
     def __init__(self, client: Any, fallback: ReplyEngine | None = None) -> None:
         self.client = client
