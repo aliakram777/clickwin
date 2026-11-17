@@ -2,6 +2,7 @@
 və xərc limiti burada QOŞULMUR (sahib qərarı və ayrıca mərhələ). Mühit dəyişəni oxunmur, şəbəkə çağırışı yoxdur."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,9 +47,11 @@ class Services:
 
 
 def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: float = 0.0,
-              https: bool = False, cloud_engine: Any = None, local_engine: Any = None, trust: TrustAnchor | None = None) -> Services:
+              https: bool = False, cloud_engine: Any = None, local_engine: Any = None, trust: TrustAnchor | None = None,
+              agent_isolation: dict | None = None) -> Services:
     d = Path(data_dir)
     d.mkdir(parents=True, exist_ok=True)
+    os.chmod(d, 0o700)   # DB/audit/açar faylları yalnız server istifadəçisinə: agent prosesi (başqa uid) onlara çata bilməz
     audit, stop = d / "audit.jsonl", d / "STOP"
     reg = Registry(d / "naymera.db")
     company = Company(reg, d / "company.db", audit, owners={owner_id}, verifier=trust.verifier if trust is not None else None)
@@ -82,7 +85,7 @@ def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: fl
     if trust is not None:   # etibarlı bootstrap: fabrik qurulur, yalnız dar imkanlar paylanır (agent icraçısı/real provayder yenə də ayrıca qoşulur)
         stack = trust.build_factory(
             company=company, auth=auth, owners={owner_id}, db_path=d / "factory.db", audit_path=audit, workspace_root=d / "workspaces",
-            team_db=d / "team.db", router=router, approvals_reader=approvals.reader, memory=lambda: memory.reader.search("", category="note", limit=3),
+            team_db=d / "team.db", router=router, approvals_reader=approvals.reader, memory=lambda: memory.reader.search("", category="note", limit=3), agent_isolation=agent_isolation,
             global_limit=lambda: policy.global_limit,
             orchestrator_factory=lambda runner: Orchestrator(reg, runner, audit_path=audit, stop_path=stop, errors_path=d / "errors.jsonl",
                                                              ledger=ledger, approvals=approvals.client, policy=policy))

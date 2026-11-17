@@ -18,7 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from agents.agent_factory import AgentFactory, AgentHandle, FactoryAdmin, FactoryPolicy, FactoryView
+from agents.agent_factory import AgentFactory, FactoryPolicy, FactoryView
+from runtime.agent_gateway import AgentGateway, NOBODY
 from agents.agent_runtime import AgentDispatcher, AgentLLMRunner
 from agents.company import Company
 from agents.factory_auth import CredentialError, Keyring, TrustedSigner, decode_public_key, decode_signing_seed, valid_key_id
@@ -76,34 +77,66 @@ def load_signing_config(env: Mapping[str, str]) -> SigningConfig | None:
     return SigningConfig(key_id, seed, retired, revoked_ids)
 
 
+_CONSOLE_OPS = ("spawn", "assign", "cancel_task", "stop", "restart", "archive", "create_agent", "grant", "set_budget", "set_policy", "resolve_request", "delete")
+
+
+class OwnerConsole:
+    """Sahib tərəfli əməliyyatların dar səthi (etibarlı server kodu üçün). Hər əməliyyat imzalı etibarnamə tələb edir; `FactoryAdmin/Control/Runtime` və ya `AgentFactory`
+    obyekti/bağlı metodu bu səthdə YOXDUR (yalnız eyni adlı sarğı funksiyalar). Agent kodu bu proseslə ümumiyyətlə eyni prosesdə deyil (`AgentGateway`)."""
+    __slots__ = _CONSOLE_OPS
+
+    def __init__(self, admin: Any) -> None:
+        for name in _CONSOLE_OPS:
+            fn = getattr(admin, name)
+
+            def call(*a: Any, _fn: Callable[..., Any] = fn, **kw: Any) -> Any:
+                return _fn(*a, **kw)
+            call.__name__ = name
+            object.__setattr__(self, name, call)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("dəyişdirilə bilməz")
+
+
 @dataclass(frozen=True)
 class FactoryStack:
-    """Etibarlı server kodunun əlində olan dar imkanlar. Agentlərə VERİLMİR (agentlər yalnız `agent_handle(...)` nəticəsini alır).
-    Burada yoxdur: imza obyektləri, `Company.admin`, `FactoryControl`/`FactoryRuntime`."""
+    """Etibarlı SERVER kodunun əlindəki dar imkanlar; agent kodu ilə ÜMUMİ PROSESDƏ deyil. Agentlər yalnız `agents` (AgentGateway) ilə AYRI proseslərdə işləyir və
+    yalnız RPC ilə danışır. Burada yoxdur: bağlı `AgentFactory` metodu, `factory.admin/control/runtime`, `Company`, `Registry`, `Keyring`, DB bağlantısı, imza/issuer obyekti.
+    (`dispatcher`/`team` etibarlı icra mühərrikləridir və fabrikə istinad saxlayır: onlar da agent koduna VERİLMİR.)"""
     view: FactoryView
     owner_gate: OwnerGate            # sahib etibarnaməsi YALNIZ step-up ilə
-    admin: FactoryAdmin              # yalnız imzalı sahib etibarnaməsi ilə işləyir
+    console: OwnerConsole            # imzalı sahib etibarnaməsi ilə işləyən dar əməliyyatlar
     dispatcher: AgentDispatcher
     team: TeamRunner
-    agent_handle: Callable[[str], AgentHandle]
+    agents: AgentGateway             # agent kodu üçün AYRI proses + minimal RPC
 
 
 class TrustAnchor:
-    """Şəxsi açar yalnız buradadır (`TrustedSigner` bağlanışı) və buradan çıxmır."""
+    """Şəxsi açar yalnız buradadır (`TrustedSigner` bağlanışı) və buradan çıxmır. Keyring idarəsi (açar əlavə/dondur/ləğv) yalnız burada saxlanır."""
 
     def __init__(self, config: SigningConfig, *, clock: Callable[[], float] = time.time) -> None:
         self._signer = TrustedSigner(config.key_id, config.seed, clock)
         ring = self._signer.verifier()
+        self._control = ring.take_control()          # YEGANƏ tutacaq: ondan sonra heç kim keyring-i dəyişə bilməz
         for key_id, public in config.verify_keys:
-            ring.add_public_key(key_id, public)
+            self._control.add_public_key(key_id, public)
         for key_id in config.revoked_keys:
-            ring.revoke_key(key_id)
-        self.verifier: Keyring = ring   # YALNIZ yoxlama: Company/fabrik/agent qatına bu verilir
+            self._control.revoke_key(key_id)
+        self._control.freeze()                       # etibarlı açar çoxluğu bootstrap-dan sonra dondurulur; yalnız ləğv (daraltma) qalır
+        self.verifier: Keyring = ring                # YALNIZ yoxlama (mutator yoxdur)
+
+    # --- control-plane (yalnız etibarlı server kodu; TrustAnchor agentlərə/FactoryStack-ə verilmir) ---
+    def revoke_key(self, key_id: str) -> None:
+        self._control.revoke_key(key_id)
+
+    def revoke_credential(self, nonce: str) -> None:
+        self._control.revoke_credential(nonce)
 
     def build_factory(self, *, company: Company, auth: AuthService, owners: Iterable[str], db_path: str | Path, audit_path: str | Path,
                       workspace_root: str | Path, team_db: str | Path, orchestrator_factory: Callable[[AgentLLMRunner], Orchestrator],
                       router: Any, approvals_reader: Any = None, memory: Callable[[], Any] | None = None, global_limit: Callable[[], float | None] | None = None,
-                      clock: Callable[[], float] = time.time, policy: FactoryPolicy | None = None, allow_mock: bool = False) -> FactoryStack:
+                      clock: Callable[[], float] = time.time, policy: FactoryPolicy | None = None, allow_mock: bool = False,
+                      program_root: str | Path | None = None, agent_isolation: dict | None = None) -> FactoryStack:
         if company._core.verifier is not self.verifier:   # Company eyni yoxlayıcı ilə qurulmalıdır (müstəqil yoxlama)
             raise BootstrapError("Company bu etibar çıpasının yoxlayıcısı (`anchor.verifier`) ilə qurulmalıdır")
         factory = AgentFactory(company, db_path, audit_path, workspace_root, owners=owners, verifier=self.verifier, allow_mock=allow_mock, clock=clock,
@@ -114,4 +147,15 @@ class TrustAnchor:
                                      approvals=approvals_reader)
         team = TeamRunner(factory, dispatcher, team_db, audit_path, system=self._signer.system_issuer(), clock=clock)
         gate = OwnerGate(auth, self._signer.owner_issuer(receipt_consumer(auth)))
-        return FactoryStack(factory.view, gate, factory.admin, dispatcher, team, factory.handle)
+        root = Path(program_root) if program_root is not None else Path(workspace_root) / "agent_programs"
+        root.mkdir(parents=True, exist_ok=True)
+        iso = {"drop_to": NOBODY, "require_os_drop": True, **(agent_isolation or {})}   # defolt: uid endirmə MƏCBURİDİR (qapalı qalır)
+
+        def ports_for(agent_id: str) -> Any:
+            return factory.handle(agent_id)
+
+        def status_of(agent_id: str) -> str | None:
+            a = factory.view.agent(agent_id)
+            return a.status if a is not None else None
+        agents = AgentGateway(ports_for, status_of, program_root=root, **iso)
+        return FactoryStack(factory.view, gate, OwnerConsole(factory.admin), dispatcher, team, agents)
