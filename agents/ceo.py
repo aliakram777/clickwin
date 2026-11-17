@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
@@ -53,6 +53,17 @@ class StepReport:
     op_id: str = ""  # son cəhdin op_id-si
     needs_reconciliation: bool = False  # xərc naməlum: rezerv əl ilə uzlaşdırılmalıdır
     approval_id: str = ""  # pending_approval: sahibin təsdiqini gözləyən sorğu
+    restored: bool = False  # saxlanmış vəziyyətdən bərpa olunub (bu icrada yenidən işləməyib)
+
+
+@dataclass(frozen=True)
+class ResumeState:
+    """Yarımçıq workflow-un davamı: `completed` (uğurlu) və `terminal` (icra olunmuş uğursuz) addımlar yenidən
+    işləmir; `attempts` — addımın davam edəcəyi cəhd nömrəsi; `blocked` — əl ilə uzlaşdırmadan əvvəl işləməməli."""
+    completed: Mapping[str, "StepReport"] = field(default_factory=dict)
+    terminal: Mapping[str, "StepReport"] = field(default_factory=dict)
+    attempts: Mapping[str, int] = field(default_factory=dict)
+    blocked: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -177,19 +188,29 @@ class CEO:
         log_budget_denial(orch.audit_path, "ceo", "plan", total, f"ceo:{goal[:60]}", reason)
         return JobReport(goal, "rejected", reason=reason)
 
-    def run_workflow(self, goal: str, steps: Sequence[PlanStep], job_id: str | None = None) -> JobReport:
+    def run_workflow(self, goal: str, steps: Sequence[PlanStep], job_id: str | None = None, *,
+                     resume: ResumeState | None = None,
+                     on_step: Callable[[PlanStep, StepReport], None] | None = None) -> JobReport:
         """Asılılıq qrafı üzrə icra: asılılıq əvvəl; uğursuz addımın asılıları dayandırılır;
-        yalnız müvəqqəti və xərci məlum xətalar `max_retries`-ə qədər təkrar olunur."""
+        yalnız müvəqqəti və xərci məlum xətalar `max_retries`-ə qədər təkrar olunur.
+        `resume`: saxlanmış vəziyyətdən davam (tamamlanmış addımlar yenidən işləmir); `on_step`: hər icra
+        olunmuş/keçilmiş addımdan sonra çağırılır (davamlı saxlama üçün)."""
         try:
             ordered = execution_order(steps)
         except PlanError as exc:
             return JobReport(goal, "rejected", reason=str(exc))
-        rejected = self._preflight(goal, ordered)
+        if resume is not None and not job_id:
+            raise ValueError("davam etdirmə üçün job_id tələb olunur")
+        fixed: dict[str, StepReport] = {} if resume is None else {**resume.completed, **resume.terminal}
+        rejected = self._preflight(goal, [s for s in ordered if s.id not in fixed])
         if rejected is not None:
             return rejected
         job_id = job_id or uuid.uuid4().hex
         reports: dict[str, StepReport] = {}
         for step in ordered:
+            if step.id in fixed:
+                reports[step.id] = replace(fixed[step.id], restored=True)
+                continue
             bad = next((d for d in step.depends_on if reports[d].status != "ok"), None)
             if self._stopped():
                 reports[step.id] = StepReport(step.department, "skipped", step_id=step.id,
@@ -197,8 +218,14 @@ class CEO:
             elif bad is not None:
                 reports[step.id] = StepReport(step.department, "skipped", step_id=step.id,
                                               reason=f"asılılıq uğursuz: {bad}")
+            elif resume is not None and step.id in resume.blocked:
+                reports[step.id] = StepReport(step.department, "skipped", step_id=step.id,
+                                              reason=resume.blocked[step.id], needs_reconciliation=True)
             else:
-                reports[step.id] = self._run_step(goal, step, job_id)
+                start = resume.attempts.get(step.id, 0) if resume is not None else 0
+                reports[step.id] = self._run_step(goal, step, job_id, start)
+            if on_step is not None:
+                on_step(step, reports[step.id])
         final = tuple(reports[s.id] for s in ordered)
         good = sum(r.status == "ok" for r in final)
         status = "ok" if good == len(final) else "partial" if good else "failed"
@@ -211,8 +238,11 @@ class CEO:
             return JobReport(goal, "no_plan", reason=str(getattr(proposal, "reason", "") or "təklif rədd edildi"))
         return self.run_workflow(goal, proposal.steps, job_id)
 
-    def _run_step(self, goal: str, step: PlanStep, job_id: str) -> StepReport:
-        for attempt in range(self.max_retries + 1):
+    def _run_step(self, goal: str, step: PlanStep, job_id: str, start_attempt: int = 0) -> StepReport:
+        if start_attempt > self.max_retries:  # cəhd limiti davam etdirmələr arasında da qüvvədədir
+            return StepReport(step.department, "error", reason="retry limiti bitib", step_id=step.id,
+                              attempts=start_attempt, op_id=f"{job_id}:{step.id}:a{start_attempt - 1}")
+        for attempt in range(start_attempt, self.max_retries + 1):
             op_id = f"{job_id}:{step.id}:a{attempt}"  # hər cəhd üçün unikal
             task = self._task(goal, step, op_id, f"ceo:{step.id}#a{attempt}:{goal[:40]}")
             result = self.orchestrator.execute(task)  # gate + büdcə burada işləyir
