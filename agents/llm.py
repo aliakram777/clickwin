@@ -19,6 +19,8 @@ import re
 import threading
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Protocol
@@ -328,6 +330,42 @@ def create_provider(config: LLMConfig, registry: ProviderRegistry | None = None)
     return provider
 
 
+# --- agent xərc əhatəsi (F-3) ---
+
+_SPEND_OP_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,100}$")
+
+
+@dataclass(frozen=True)
+class SpendScope:
+    """Ödənişli LLM sorğusunun hansı agentə və əməliyyata aid olduğunu bildirir. `GuardedLLM` bu əhatə daxilində xərci Ledger-də AGENTİN adına
+    rezerv edir, agentin büdcə limitini (və varsa ümumi limiti) AÇIQ çağırışdan əvvəl yoxlayır."""
+    agent: str
+    op_id: str
+    agent_limit: float
+    global_limit: float | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.agent, str) or not self.agent.strip() or not isinstance(self.op_id, str) or not _SPEND_OP_RE.match(self.op_id):
+            raise ValueError("xərc əhatəsi: agent/op_id yanlışdır")
+        for name, v in (("agent_limit", self.agent_limit), ("global_limit", self.global_limit)):
+            if v is None and name == "global_limit":
+                continue
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+                raise ValueError(f"xərc əhatəsi: {name} sonlu və mənfi olmayan rəqəm olmalıdır")
+
+
+_SPEND_SCOPE: ContextVar[SpendScope | None] = ContextVar("naymera_spend_scope", default=None)
+
+
+@contextmanager
+def spend_scope(scope: SpendScope):
+    token = _SPEND_SCOPE.set(scope)
+    try:
+        yield scope
+    finally:
+        _SPEND_SCOPE.reset(token)
+
+
 # --- qoruyucu müştəri ---
 
 @dataclass(frozen=True)
@@ -399,12 +437,22 @@ class GuardedLLM:
             self._reserved += reserve
 
         op_id = ""
+        scope = _SPEND_SCOPE.get()
+        if scope is not None and self.ledger is None and not bool(getattr(self.provider, "is_mock", False)):
+            self._release_tokens(reserve)  # agent əhatəsində real provayder: xərc kitabı olmadan agent büdcəsi yoxlana bilməz -> bağlıdır
+            raise fail("budget_exceeded", LLMBudgetExceeded("agent xərc büdcəsi üçün xərc kitabı (ledger) tələb olunur"))
         if self.ledger is not None:  # xərc büdcəsi (davamlı)
             est_cost = est_in * cfg.price_in_per_1k / 1000 + cap * cfg.price_out_per_1k / 1000
-            op_id = "llm:" + uuid.uuid4().hex
-            res = self.ledger.reserve(op_id, "llm", est_cost, agent_limit=cfg.cost_limit,
-                                      description=f"llm:{name}")
+            if scope is not None:  # agentə aid sorğu: Ledger-də AGENTİN adına, sabit op_id ilə (təkrar icra ikinci dəfə ödənilmir)
+                op_id = "llm:" + scope.op_id
+                res = self.ledger.reserve(op_id, scope.agent, est_cost, agent_limit=scope.agent_limit, global_limit=scope.global_limit,
+                                          group_prefix="llm:", group_limit=cfg.cost_limit, description=f"llm:{name}")
+            else:
+                op_id = "llm:" + uuid.uuid4().hex
+                res = self.ledger.reserve(op_id, "llm", est_cost, agent_limit=cfg.cost_limit,
+                                          description=f"llm:{name}")
             if res.status != "reserved":
+                op_id = ""   # rezerv götürülməyib: sonrakı mərhələlər başqasının qeydinə toxunmur
                 self._release_tokens(reserve)
                 raise fail("budget_exceeded", LLMBudgetExceeded(res.reason or "xərc büdcəsi aşılır"))
 
@@ -452,8 +500,17 @@ class GuardedLLM:
         actual = resp.input_tokens + resp.output_tokens
         cost = resp.input_tokens * cfg.price_in_per_1k / 1000 + resp.output_tokens * cfg.price_out_per_1k / 1000
         self._finish_tokens(reserve, actual)
-        if op_id:
-            self.ledger.commit(op_id, cost)
+        if op_id:  # hesablaşma uğursuzdursa nəticə QAYTARILMIR: rezerv qorunur və sahibin uzlaşdırması üçün işarələnir
+            try:
+                settled = bool(self.ledger.commit(op_id, cost))
+            except Exception:  # noqa: BLE001
+                settled = False
+            if not settled:
+                try:
+                    self._ledger_unknown(op_id)
+                except Exception:  # noqa: BLE001
+                    pass
+                raise fail("settlement_failed", LLMBadResponse("xərc hesablaşması uğursuz oldu; rezerv qorunur (uzlaşdırma tələb olunur)"))
         info.update(input_tokens=resp.input_tokens, output_tokens=resp.output_tokens, response_chars=len(resp.text))
         if resp.output_tokens > cap:
             raise fail("bad_response", LLMBadResponse("provayder çıxış token limitini aşdı"))

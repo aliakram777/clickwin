@@ -16,10 +16,9 @@ from agents.orchestrator import Orchestrator
 from agents.registry import Registry
 from safety.approvals import ApprovalService, Principal
 from safety.ledger import CostLedger, reconcile
+from tests.factory_keys import AUTH, DISPATCHER, OWNER, SYSTEM
 from tests.test_hybrid_router import Clock, Fake
 
-OWNER = Principal("owner", "human", "console")
-SYSTEM = Principal("naymera", "system", "core")
 LEAK = "sk-test-" + "FAKEKEY1234567890abcdef"
 
 
@@ -33,17 +32,17 @@ def world(tmp_path, monkeypatch):
     audit, stop = tmp_path / "audit.jsonl", tmp_path / "STOP"
     reg = Registry(":memory:")
     company = Company(reg, tmp_path / "company.db", audit, owners={"owner"}, clock=clock)
-    factory = AgentFactory(company, tmp_path / "factory.db", audit, tmp_path / "ws", owners={"owner"}, clock=clock)
+    factory = AgentFactory(company, tmp_path / "factory.db", audit, tmp_path / "ws", owners={"owner"}, clock=clock, authority=AUTH)
     store = AiStore(tmp_path / "ai.db", clock=clock)
     cloud, local = Fake("cloud", script=["Bulud cavabı: hazırdır"]), Fake("local", state="not_configured")
     store.set_mode(Mode.AUTO, "owner")
     router = HybridRouter(cloud, local, store, clock=clock, stop_path=stop)
     approvals = ApprovalService(tmp_path / "approvals.db", audit, owners={"owner"}, ttl_seconds=3600, clock=clock)
     ledger = CostLedger(tmp_path / "ledger.db")
-    runner = AgentLLMRunner(factory, router)
+    runner = AgentLLMRunner(factory, router, global_limit=lambda: 5.0)
     orch = Orchestrator(reg, runner, audit_path=audit, stop_path=stop, errors_path=tmp_path / "e.jsonl", ledger=ledger,
                         approvals=approvals.client, policy=company.view.budget_policy(global_limit=5.0))
-    disp = AgentDispatcher(factory, orch, runner, approvals=approvals.reader)
+    disp = AgentDispatcher(factory, orch, runner, principal=DISPATCHER, approvals=approvals.reader)
 
     class W:
         pass
