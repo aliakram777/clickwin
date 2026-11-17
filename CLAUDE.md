@@ -1,7 +1,7 @@
 # CLAUDE.md — NAYMERA
 
 Agent sistemi: CEO agent + şöbə agentləri. Stack: Python 3.12, pytest, SQLite.
-Mərhələ 1-8 hazırdır (7: Effect Broker — yan təsirlərin yeganə yolu; 8: təsdiq xidməti): agent yaratma, təhlükəsizlik qapısı, reyestr, orkestrator, CEO agent, xərc kitabı, büdcə siyasəti, asılılıq qrafı və retry (bax: STATUS.md).
+Mərhələ 1-9 hazırdır (7: Effect Broker; 8: təsdiq xidməti; 9: Tool Runtime + workspace): agent yaratma, təhlükəsizlik qapısı, reyestr, orkestrator, CEO agent, xərc kitabı, büdcə siyasəti, asılılıq qrafı və retry (bax: STATUS.md).
 
 ## Mütləq qaydalar
 
@@ -19,6 +19,7 @@ Mərhələ 1-8 hazırdır (7: Effect Broker — yan təsirlərin yeganə yolu; 8
    nəticəsini göstər. Çalışdırmadığını "keçdi" kimi təqdim etmə.
 5. Təhlükəli/geri qaytarılmaz əməliyyatdan əvvəl `safety-layer` skill-ini işlət.
    Yeni yan təsirli kod (alət, agent icrası) yalnız `EffectBroker.run` üzərindən işləyir; alətləri `@broker_only` ilə bəzə.
+   Alətlər yalnız `ToolRuntime` ilə (qeydiyyatlı allowlist, `@tool_handler`); shell/şəbəkə/sistem/env alətləri defoltda bağlıdır və yalnız təsdiqlənmiş OS sandbox adapteri ilə mümkündür. In-process məhdudiyyətləri OS sandbox kimi təqdim etmə.
    Həssas effektlər `ApprovalService` ilə təsdiqlənir: agentlər/broker `ApprovalGateway`-ə (approve/deny) çıxış almır; testdəki mock təsdiqi (`kind="mock"`) real istifadəçi təsdiqi kimi təqdim olunmur.
 6. Soruşulmayan kod yazma: tapşırığın çərçivəsindən kənara çıxma.
 
@@ -58,8 +59,10 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 ├── safety/gate.py             # icazə, xərc limiti, təsdiq, audit, stop
 ├── safety/broker.py           # Effect Broker: stop -> təkrar -> rezerv -> Gate -> icra -> hesablaşma; @broker_only
 ├── safety/approvals.py        # təsdiq xidməti: hash-ə bağlı, vaxtlı, tək istifadəlik; Client (broker) / Gateway (kanallar)
+├── safety/tools.py            # Tool Runtime: allowlist, limitlər, SandboxAdapter interfeysi (real OS sandbox YOXDUR)
+├── safety/workspace.py        # workspace fayl sərhədi (tətbiq səviyyəli) + fs.read/fs.write/fs.list
 ├── safety/ledger.py           # SQLite xərc kitabı: rezerv/təsdiq/azad, limitlər (data/ledger.db)
-└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration/workflow/retry/broker/approvals/approval_broker)
+└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration/workflow/retry/broker/approvals/approval_broker/workspace/tool_runtime)
 ```
 
 Yeni kod əlavə olunanda bu xəritəni yenilə.
