@@ -102,6 +102,17 @@ class CEO:
             return JobReport(goal, "rejected",
                              reason=f"plan büdcəni aşır: {total:.4f} > {self.budget:.4f}")
 
+        pol = self.orchestrator.policy
+        if pol is not None and pol.task_limit is not None:
+            over = [s.department for s in steps if s.cost > pol.task_limit + 1e-9]
+            if over:
+                return JobReport(goal, "rejected",
+                                 reason=f"tapşırıq limiti aşılır ({pol.task_limit:.4f}): {over}")
+        room = self.orchestrator.global_room()
+        if room is not None and total > room + 1e-9:
+            return JobReport(goal, "rejected",
+                             reason=f"ümumi xərc limiti aşılır: plan {total:.4f} > qalan {room:.4f}")
+
         reports: list[StepReport] = []
         for i, step in enumerate(steps):
             if self._stopped():

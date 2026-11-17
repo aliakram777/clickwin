@@ -1,7 +1,7 @@
 # CLAUDE.md — NAYMERA
 
 Agent sistemi: CEO agent + şöbə agentləri. Stack: Python 3.12, pytest, SQLite.
-Mərhələ 1-4 hazırdır: agent yaratma, təhlükəsizlik qapısı, reyestr, orkestrator, CEO agent, davamlı xərc kitabı (bax: STATUS.md).
+Mərhələ 1-5 hazırdır: agent yaratma, təhlükəsizlik qapısı, reyestr, orkestrator, CEO agent, davamlı xərc kitabı və büdcə siyasəti (bax: STATUS.md).
 
 ## Mütləq qaydalar
 
@@ -53,8 +53,8 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 │   ├── orchestrator.py        # şöbəyə yönləndirmə; icra yalnız gate ilə
 │   └── ceo.py                 # CEO: plan, bölgü, toplama, yoxlama, hesabat
 ├── safety/gate.py             # icazə, xərc limiti, təsdiq, audit, stop
-├── safety/ledger.py           # SQLite xərc kitabı (data/ledger.db) + audit uyğunluğu
-└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration)
+├── safety/ledger.py           # SQLite xərc kitabı: rezerv/təsdiq/azad, limitlər (data/ledger.db)
+└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration)
 ```
 
 Yeni kod əlavə olunanda bu xəritəni yenilə.
