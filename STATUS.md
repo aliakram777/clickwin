@@ -30,6 +30,7 @@ Mərhələ 5 — ümumi büdcə və xərc hesablaşması (tamamlandı, PR təsdi
 - Faktiki xərc rezervdən çox ola bilər: həqiqət olaraq yazılır, `reconcile()` bunu bildirir (əvvəlcədən qarşısı alınmır).
 
 ## Növbəti addımlar (təsdiq gözləyir)
+Tam plan: [ROADMAP.md](ROADMAP.md).
 - LLM əsaslı Planner (interfeys hazırdır, real API təsdiq tələb edir)
 - Addımlar arası asılılıq və uğursuz addımın təkrarı
 - Naməlum xərcli rezervlərin avtomatik həlli (vaxt aşımı / hesabat)

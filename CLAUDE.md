@@ -37,6 +37,7 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 .
 ├── CLAUDE.md                  # bu fayl: qaydalar, əmrlər, xəritə
 ├── README.md                  # layihə təsviri
+├── ROADMAP.md                 # məhsul yol xəritəsi (mərhələlər, arxitektura, təhlükəsizlik)
 ├── STATUS.md                  # cari vəziyyət (hər əhəmiyyətli işdən sonra yenilə)
 ├── requirements.txt           # iş vaxtı asılılıqları (pyyaml)
 ├── pytest.ini                 # testpaths, pythonpath
