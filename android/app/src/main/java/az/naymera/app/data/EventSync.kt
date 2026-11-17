@@ -13,11 +13,11 @@ enum class ConnectionState { Connected, Reconnecting, Offline }
  * Hadisə axını: server kursoru ilə qısa sorğulama (push/FCM yoxdur). Kursor yalnız hadisələr işlənəndən sonra irəlilədilir
  * və server tərəfə `ack` göndərilir. Əlaqə kəsilərsə eksponensial backoff ilə yenidən cəhd edilir; 401 yuxarı atılır.
  */
-class EventSync(private val api: ApiClient, private val store: SessionStore) {
+class EventSync(private val api: ApiClient, private val store: TokenStore, private val backoffBaseMs: Long = 5_000L) {
     private val _state = MutableStateFlow(ConnectionState.Connected)
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
 
-    private fun backoff(failures: Int): Long = minOf(60_000L, 5_000L shl minOf(failures, 4))
+    private fun backoff(failures: Int): Long = minOf(60_000L, backoffBaseMs shl minOf(failures, 4))
 
     fun stream(intervalMs: Long = 5_000): Flow<List<MobileEvent>> = flow {
         var failures = 0

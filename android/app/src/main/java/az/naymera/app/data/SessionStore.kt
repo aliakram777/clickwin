@@ -10,7 +10,7 @@ import androidx.security.crypto.MasterKey
  * cihazın imza açarı burada DEYİL, Android Keystore-dadır (`DeviceKey`) və cihazdan çıxmır.
  * Dəyərlər Android Keystore ilə şifrələnmiş SharedPreferences-dədir; ehtiyat nüsxəsi söndürülüb.
  */
-class SessionStore(context: Context) {
+class SessionStore(context: Context) : TokenStore {
     private val prefs: SharedPreferences = EncryptedSharedPreferences.create(
         context,
         "naymera_session",
@@ -19,23 +19,23 @@ class SessionStore(context: Context) {
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
 
-    var serverUrl: String
+    override var serverUrl: String
         get() = prefs.getString("server_url", "") ?: ""
         set(v) = prefs.edit().putString("server_url", v).apply()
 
-    val accessToken: String get() = prefs.getString("access_token", "") ?: ""
+    override val accessToken: String get() = prefs.getString("access_token", "") ?: ""
 
-    val refreshToken: String get() = prefs.getString("refresh_token", "") ?: ""
+    override val refreshToken: String get() = prefs.getString("refresh_token", "") ?: ""
 
     val deviceId: String get() = prefs.getString("device_id", "") ?: ""
 
-    var eventCursor: Long
+    override var eventCursor: Long
         get() = prefs.getLong("event_cursor", 0L)
         set(v) = prefs.edit().putLong("event_cursor", v).apply()
 
     val isPaired: Boolean get() = refreshToken.isNotEmpty() && DeviceKey.exists()
 
-    fun savePairing(r: PairResponse) {
+    override fun savePairing(r: PairResponse) {
         prefs.edit()
             .putString("device_id", r.deviceId)
             .putString("access_token", r.accessToken)
@@ -43,12 +43,12 @@ class SessionStore(context: Context) {
             .apply()
     }
 
-    fun saveTokens(t: TokenResponse) {
+    override fun saveTokens(t: TokenResponse) {
         prefs.edit().putString("access_token", t.accessToken).putString("refresh_token", t.refreshToken).apply()
     }
 
     /** Çıxışda tokenlər və cihaz açarı silinir. */
-    fun clear() {
+    override fun clear() {
         prefs.edit().clear().apply()
         DeviceKey.delete()
     }

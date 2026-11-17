@@ -1,6 +1,7 @@
 package az.naymera.app.data
 
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.URI
@@ -39,13 +40,22 @@ object ServerUrl {
     }
 }
 
-class ApiClient(private val store: SessionStore) {
+/** Vaxt aşımları (ms). Testlər qısa profil istifadə edir. */
+data class ApiTimeouts(
+    val connectMs: Long = 8_000,
+    val readMs: Long = 20_000,
+    val writeMs: Long = 20_000,
+    val callMs: Long = 30_000,
+    val retryBaseMs: Long = 500,
+)
+
+class ApiClient(private val store: TokenStore, private val timeouts: ApiTimeouts = ApiTimeouts()) {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
     private val http = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .writeTimeout(20, TimeUnit.SECONDS)
-        .callTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(timeouts.connectMs, TimeUnit.MILLISECONDS)
+        .readTimeout(timeouts.readMs, TimeUnit.MILLISECONDS)
+        .writeTimeout(timeouts.writeMs, TimeUnit.MILLISECONDS)
+        .callTimeout(timeouts.callMs, TimeUnit.MILLISECONDS)
         .followRedirects(false)
         .followSslRedirects(false)
         .build()
@@ -67,11 +77,12 @@ class ApiClient(private val store: SessionStore) {
     }
 
     /** Eksponensial geri çəkilmə (backoff): 0.5s, 1s, 2s … yuxarı hədd 8s. */
-    private fun backoff(attempt: Int): Long = minOf(8_000L, 500L shl attempt)
+    private fun backoff(attempt: Int): Long = minOf(8_000L, timeouts.retryBaseMs shl attempt)
 
     private fun mapIo(e: IOException): ApiException {
         val failure = when (e) {
             is SocketTimeoutException -> ApiFailure.Timeout
+            is InterruptedIOException -> ApiFailure.Timeout // OkHttp callTimeout
             is UnknownHostException -> ApiFailure.Offline
             is ConnectException -> ApiFailure.Offline
             is SSLException -> ApiFailure.Unknown

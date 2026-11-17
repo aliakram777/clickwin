@@ -21,12 +21,10 @@ object StepUp {
         BiometricManager.from(activity).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
             BiometricManager.BIOMETRIC_SUCCESS
 
-    /** Server tərəfdə `AuthService.step_up_message` ilə eyni mesaj. */
+    /** Server tərəfdə `AuthService.step_up_message` ilə eyni mesaj (`Messages`). */
     fun challengeMessage(
         challengeId: String, nonce: String, action: String, subject: String, payloadHash: String, decision: String,
-    ): ByteArray =
-        listOf("naymera-step-up", challengeId, nonce, action, subject, payloadHash, decision)
-            .joinToString("|").toByteArray(Charsets.UTF_8)
+    ): ByteArray = Messages.challengeMessage(challengeId, nonce, action, subject, payloadHash, decision)
 
     /** Biometrik təsdiq + imza. Ləğv/xəta/açar etibarsızlığı halında null; base64 (NO_WRAP) DER imza qaytarır. */
     suspend fun sign(

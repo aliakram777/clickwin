@@ -1,7 +1,7 @@
 # CLAUDE.md — NAYMERA
 
 Agent sistemi: CEO agent + şöbə agentləri. Stack: Python 3.12, pytest, SQLite.
-Mərhələ 1-14 hazırdır (13-14: Android API, Keystore/biometrik imza ilə step-up, Kotlin/Compose layihəsi, APK build EDİLMƏYİB; 7: Effect Broker; 8: təsdiq; 9: Tool Runtime; 10: LLM adapter — interfeys və mock; 11: yaddaş və virtual şirkət; 12: internet araşdırması, proaktiv zəka, Android-first interfeyslər). Əsas platforma: Android APK (Telegram əsas deyil): agent yaratma, təhlükəsizlik qapısı, reyestr, orkestrator, CEO agent, xərc kitabı, büdcə siyasəti, asılılıq qrafı və retry (bax: STATUS.md).
+Mərhələ 1-15 hazırdır (13-15: Android API, Keystore/biometrik imza ilə step-up, Kotlin/Compose layihəsi, JVM kontrakt sınağı; APK build EDİLMƏYİB — SDK/`dl.google.com` yoxdur; 7: Effect Broker; 8: təsdiq; 9: Tool Runtime; 10: LLM adapter — interfeys və mock; 11: yaddaş və virtual şirkət; 12: internet araşdırması, proaktiv zəka, Android-first interfeyslər). Əsas platforma: Android APK (Telegram əsas deyil): agent yaratma, təhlükəsizlik qapısı, reyestr, orkestrator, CEO agent, xərc kitabı, büdcə siyasəti, asılılıq qrafı və retry (bax: STATUS.md).
 
 ## Mütləq qaydalar
 
@@ -25,7 +25,7 @@ Mərhələ 1-14 hazırdır (13-14: Android API, Keystore/biometrik imza ilə ste
    Yeni yan təsirli kod (alət, agent icrası) yalnız `EffectBroker.run` üzərindən işləyir; alətləri `@broker_only` ilə bəzə.
    Alətlər yalnız `ToolRuntime` ilə (qeydiyyatlı allowlist, `@tool_handler`); shell/şəbəkə/sistem/env alətləri defoltda bağlıdır və yalnız təsdiqlənmiş OS sandbox adapteri ilə mümkündür. In-process məhdudiyyətləri OS sandbox kimi təqdim etmə.
    Həssas effektlər `ApprovalService` ilə təsdiqlənir: agentlər/broker `ApprovalGateway`-ə (approve/deny) çıxış almır; testdəki mock təsdiqi (`kind="mock"`) real istifadəçi təsdiqi kimi təqdim olunmur.
-6. **API/Android:** `api/` modulları `safety.broker/gate/tools/workspace/ledger` import etmir və env/şəbəkə istifadə etmir; təsdiq yalnız cihazın Keystore açarı ilə biometrik imza (step-up) ilə — serverdə yalnız açıq açar, şəxsi açar/paylaşılan sirr yox (səs/söhbət mətni heç vaxt); Android backend-də olmayan imkanı (`/v1/capabilities`) işləyirmiş kimi göstərmir, mock rejimini açıq göstərir; APK-da API açarı olmaz; build edilmədiyi halda "APK hazırdır" demə.
+6. **API/Android:** `api/` modulları `safety.broker/gate/tools/workspace/ledger` import etmir və env/şəbəkə istifadə etmir; təsdiq yalnız cihazın Keystore açarı ilə biometrik imza (step-up) ilə — serverdə yalnız açıq açar, şəxsi açar/paylaşılan sirr yox (səs/söhbət mətni heç vaxt); Android backend-də olmayan imkanı (`/v1/capabilities`) işləyirmiş kimi göstərmir, mock rejimini açıq göstərir; APK-da API açarı olmaz; build edilmədiyi halda "APK hazırdır" demə; APK imzalama/yayımlama (açar, hesab, `signingConfigs`) sahib qərarı olmadan qurulmur.
 7. Soruşulmayan kod yazma: tapşırığın çərçivəsindən kənara çıxma.
 
 ## Əmrlər
@@ -71,7 +71,8 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 │   ├── llm_planner.py         # LLM yalnız TƏKLİF: plan və agent təsviri (ciddi doğrulama); icra CEO/Broker ilə
 │   └── ceo.py                 # CEO: plan, bölgü, toplama, yoxlama, hesabat, run_workflow + retry
 ├── api/                       # Android API (stdlib): http.py (App/WSGI), auth.py (cütləşmə, tokenlər, step-up), p256.py (ECDSA P-256 yoxlama), chat.py, events.py, jobs.py, app.py (marşrutlar), bootstrap.py, server.py
-├── android/                   # Kotlin + Compose layihəsi (build edilməyib: BUILD_STATUS.md); APK-da açar yoxdur
+├── android/                   # Kotlin + Compose layihəsi (build edilməyib: BUILD_STATUS.md, AUDIT.md, DEVICE_TEST.md); jvm-contract/ — Android-dan asılı olmayan Kotlin qatının JVM sınağı; APK-da açar yoxdur
+├── tools/jvm_contract.py      # həqiqi backend + Kotlin JVM testləri (opt-in; Maven Central)
 ├── safety/gate.py             # icazə, xərc limiti, təsdiq, audit, stop
 ├── safety/broker.py           # Effect Broker: stop -> təkrar -> rezerv -> Gate -> icra -> hesablaşma; @broker_only
 ├── safety/approvals.py        # təsdiq xidməti: hash-ə bağlı, vaxtlı, tək istifadəlik; Client (broker) / Gateway (kanallar)
@@ -79,7 +80,7 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 ├── safety/tools.py            # Tool Runtime: allowlist, limitlər, SandboxAdapter interfeysi (real OS sandbox YOXDUR)
 ├── safety/workspace.py        # workspace fayl sərhədi (tətbiq səviyyəli) + fs.read/fs.write/fs.list
 ├── safety/ledger.py           # SQLite xərc kitabı: rezerv/təsdiq/azad, limitlər (data/ledger.db)
-└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration/workflow/retry/broker/approvals/approval_broker/workspace/tool_runtime/llm/llm_planner/memory/company/durable/research/proactive/mobile/api_http/api_auth/api_app/api_bootstrap/api_p256/android_integration/android_project)
+└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration/workflow/retry/broker/approvals/approval_broker/workspace/tool_runtime/llm/llm_planner/memory/company/durable/research/proactive/mobile/api_http/api_auth/api_app/api_bootstrap/api_p256/android_integration/android_project/jvm_contract[opt-in])
 ```
 
 Yeni kod əlavə olunanda bu xəritəni yenilə.
