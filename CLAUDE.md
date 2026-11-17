@@ -1,7 +1,7 @@
 # CLAUDE.md — NAYMERA
 
 Agent sistemi: CEO agent + şöbə agentləri. Stack: Python 3.12, pytest, SQLite.
-Hazırda yalnız iskelet və CI var; agent kodu hələ yazılmayıb.
+Mərhələ 1 hazırdır: agent yaratma modulu + təhlükəsizlik qapısı (bax: STATUS.md).
 
 ## Mütləq qaydalar
 
@@ -24,7 +24,7 @@ Hazırda yalnız iskelet və CI var; agent kodu hələ yazılmayıb.
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install pytest
+pip install pytest -r requirements.txt
 pytest                 # bütün testlər
 pytest -q tests/test_x.py::test_name   # tək test
 ```
@@ -38,12 +38,19 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 ├── CLAUDE.md                  # bu fayl: qaydalar, əmrlər, xəritə
 ├── README.md                  # layihə təsviri
 ├── STATUS.md                  # cari vəziyyət (hər əhəmiyyətli işdən sonra yenilə)
-├── .gitignore                 # .env, .venv, *.db və s.
+├── requirements.txt           # iş vaxtı asılılıqları (pyyaml)
+├── pytest.ini                 # testpaths, pythonpath
+├── .gitignore                 # .env, .venv, logs/, *.db və s.
 ├── .github/workflows/ci.yml   # GitHub Actions: pytest
 ├── .claude/skills/
 │   ├── test-gate/SKILL.md     # "hazırdır" qapısı
 │   └── safety-layer/SKILL.md  # pul/hesab/nəşr/sirr təhlükəsizlik qatı
-└── tests/                     # pytest testləri
+├── agents/
+│   ├── spec.py                # AgentSpec (YAML) + doğrulama
+│   ├── factory.py             # məqsəddən təsvir (LLM interfeysi, MockLLM)
+│   └── verify.py              # test tapşırığı ilə yoxlama -> logs/errors.jsonl
+├── safety/gate.py             # icazə, xərc limiti, təsdiq, audit, stop
+└── tests/                     # pytest testləri (test_spec/factory/verify/gate)
 ```
 
 Yeni kod əlavə olunanda bu xəritəni yenilə.
