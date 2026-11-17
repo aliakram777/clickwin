@@ -3,11 +3,11 @@ package az.naymera.app.security
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import android.security.keystore.StrongBoxUnavailableException
 import androidx.biometric.BiometricPrompt
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.PrivateKey
+import java.security.ProviderException
 import java.security.Signature
 import java.security.spec.ECGenParameterSpec
 
@@ -52,7 +52,8 @@ object DeviceKey {
         try {
             gen.initialize(spec(strongBox = true))
             gen.generateKeyPair()
-        } catch (e: StrongBoxUnavailableException) {
+        } catch (e: ProviderException) {
+            // StrongBox yoxdur: onun xüsusi istisna sinfi (yeni API) əvəzinə ümumi ProviderException tutulur, ki API 26-27-də sinif yüklənməsi çökməsin.
             gen.initialize(spec(strongBox = false))
             gen.generateKeyPair()
         }
@@ -70,7 +71,7 @@ object DeviceKey {
     fun cryptoObject(): BiometricPrompt.CryptoObject = BiometricPrompt.CryptoObject(newSignature())
 
     /** Server tərəfdə `AuthService.pair_message` ilə eyni mesaj. */
-    fun pairMessage(code: String): ByteArray = "naymera-pair|$code".toByteArray(Charsets.UTF_8)
+    fun pairMessage(code: String): ByteArray = Messages.pairMessage(code)
 
     /** Biometrik təsdiqdən sonra açılmış `Signature` ilə imzalayır. */
     fun signWith(crypto: BiometricPrompt.CryptoObject, message: ByteArray): ByteArray {

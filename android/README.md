@@ -18,3 +18,5 @@ Pulsuz və minimal asılılıq dəsti; reklam/analitika/ödəniş/üçüncü tə
 
 ## Quruluş
 `data/` (ApiClient, ApiFailure, SessionStore, Models, EventSync) · `ui/` (ekranlar, tema, UiText) · `voice/` (STT/TTS interfeysləri, MockSpeech) · `security/` (DeviceKey, StepUp). Dillər: `res/values` (az), `values-en|ru|tr`.
+
+JVM kontrakt layihəsi: `jvm-contract/` (Android-dan asılı olmayan Kotlin qatı JVM-də kompilyasiya və həqiqi backend ilə sınaq: `python3 tools/jvm_contract.py`). Audit: `AUDIT.md`. Build: `BUILD_STATUS.md`. Cihaz sınağı: `DEVICE_TEST.md`.

@@ -21,7 +21,7 @@ def text(path):
 
 
 def all_text_files():
-    return [p for p in AND.rglob("*") if p.is_file() and p.suffix in {".kt", ".kts", ".xml", ".md", ".properties",
+    return [p for p in AND.rglob("*") if p.is_file() and not ({"build", ".gradle"} & set(p.relative_to(AND).parts)) and p.suffix in {".kt", ".kts", ".xml", ".md", ".properties",
                                                                       ".json", ".txt", ".gradle", ".pro"}]
 
 
@@ -194,10 +194,12 @@ def test_no_shared_secret_or_hmac_remains_anywhere_in_the_android_project():
 
 def test_step_up_signs_with_the_keystore_key_and_matches_the_server_message_format():
     step = text(next(p for p in KT if p.name == "StepUp.kt"))
-    assert "DeviceKey" in step and "CryptoObject" in step and '"naymera-step-up"' in step and 'joinToString("|")' in step
+    msgs = text(next(p for p in KT if p.name == "Messages.kt"))
+    assert "DeviceKey" in step and "CryptoObject" in step and '"naymera-step-up"' in msgs and 'joinToString("|")' in msgs
+    assert "Messages.challengeMessage" in step
     assert 'method = "voice"' not in step and "voice" not in step.lower().replace("voice_", "")
     key = text(next(p for p in KT if p.name == "DeviceKey.kt"))
-    assert '"naymera-pair|' in key or '"naymera-pair"' in key
+    assert '"naymera-pair|' in text(next(p for p in KT if p.name == "Messages.kt")) and "Messages.pairMessage" in key
 
 
 def test_network_failures_timeouts_and_disconnects_are_modeled_explicitly():
@@ -275,3 +277,57 @@ def test_voice_stays_a_labeled_future_interface():
     assert "MockSpeech" in voice and "isMock" in voice and "FEMALE" in voice and "az-AZ" in voice
     chat_vm = text(next(p for p in KT if p.name == "ChatViewModel.kt"))
     assert "stt.available" in chat_vm  # real STT yoxdursa transkript göndərilmir
+
+
+# --- Stage 15: audit, build uyğunluğu, JVM kontrakt layihəsi ---
+
+def test_kotlin_core_is_testable_without_android_and_has_no_api_below_26_traps():
+    api = text(next(p for p in KT if p.name == "ApiClient.kt"))
+    assert "interface TokenStore" in text(next(p for p in KT if p.name == "TokenStore.kt"))
+    assert "class ApiClient(private val store: TokenStore" in api and "SessionStore" not in api
+    assert "class SessionStore" in text(next(p for p in KT if p.name == "SessionStore.kt")) and ": TokenStore" in text(next(p for p in KT if p.name == "SessionStore.kt"))
+    msg = text(next(p for p in KT if p.name == "Messages.kt"))
+    assert "import android" not in msg and "import androidx" not in msg
+    for name in ("ApiClient.kt", "EventSync.kt", "ApiFailure.kt", "Models.kt", "TokenStore.kt"):
+        body = text(next(p for p in KT if p.name == name))
+        assert "import android" not in body and "import androidx" not in body, name  # JVM-də kompilyasiya olunur
+    key = text(next(p for p in KT if p.name == "DeviceKey.kt"))
+    assert "StrongBoxUnavailableException" not in key and "ProviderException" in key  # API 28 sinfi API 26-da çökdürə bilər
+
+
+def test_jvm_contract_project_compiles_the_real_kotlin_sources_and_ships_no_binaries():
+    jvm = AND / "jvm-contract"
+    for rel in ("settings.gradle.kts", "build.gradle.kts", "README.md", "src/test/kotlin/MessagesTest.kt",
+                "src/test/kotlin/BackendContractTest.kt", "src/test/kotlin/NetworkFailureTest.kt", "src/test/kotlin/TestSupport.kt"):
+        assert (jvm / rel).is_file(), rel
+    build = text(jvm / "build.gradle.kts")
+    assert "../app/src/main/java/az/naymera/app/data" in build and "security/Messages.kt" in build
+    assert "com.android" not in build and "google()" not in build and "signingConfigs" not in build
+    assert "NAYMERA_BACKEND_URL" in text(jvm / "src/test/kotlin/BackendContractTest.kt")
+    assert (ROOT / "tools" / "jvm_contract.py").is_file()
+
+
+def test_no_signing_material_or_release_automation_exists():
+    for p in AND.rglob("*"):
+        if p.is_file() and p.suffix in {".kts", ".gradle", ".properties", ".md"} and p.name != "BUILD_STATUS.md":
+            c = text(p)
+            assert "signingConfigs" not in c and "storePassword" not in c and "keyPassword" not in c, p
+    gi = text(AND / ".gitignore")
+    assert all(x in gi for x in ("*.jks", "*.keystore", "*.apk", "*.aab", "local.properties"))
+
+
+def test_build_status_documents_exact_requirements_blocker_and_local_steps():
+    s = text(AND / "BUILD_STATUS.md")
+    for needle in ("build EDİLMƏYİB", "dl.google.com", "compileSdk 34", "build-tools;34.0.0", "platforms;android-34", "AGP 8.5.2",
+                   "Gradle 8.7", "JDK 17", "Kotlin 2.0.20", "assembleDebug", "app-debug.apk", "JVM kontrakt", "sdkmanager",
+                   "gradle wrapper", "imzalanmayıb"):
+        assert needle in s, needle
+    assert (AND / "AUDIT.md").is_file()
+    audit = text(AND / "AUDIT.md")
+    for needle in ("StrongBoxUnavailableException", "TokenStore", "Gradle wrapper", "launcher"):
+        assert needle in audit, needle
+
+
+def test_launcher_icon_is_declared_and_exists():
+    assert 'android:icon="@drawable/ic_launcher"' in text(SRC / "AndroidManifest.xml")
+    assert (SRC / "res" / "drawable" / "ic_launcher.xml").is_file()

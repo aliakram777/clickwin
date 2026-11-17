@@ -1,6 +1,7 @@
 package az.naymera.app.data
 
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
@@ -23,6 +24,7 @@ enum class ApiFailure {
 
         fun fromThrowable(t: Throwable): ApiFailure = when (t) {
             is SocketTimeoutException -> Timeout
+            is InterruptedIOException -> Timeout
             is UnknownHostException -> Offline
             is ConnectException -> Offline
             is SSLException -> Unknown

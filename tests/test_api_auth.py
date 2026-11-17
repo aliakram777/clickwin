@@ -317,3 +317,13 @@ def test_server_stores_only_the_public_key(env):
     assert "public_key" in cols and "secret" not in cols
     blob = json.dumps([list(map(str, r)) for r in conn.execute("SELECT * FROM devices").fetchall()])
     assert b64(dev.kp.spki()) in blob and str(dev.kp._d) not in blob
+
+
+# --- dillərarası vektor: Kotlin `Messages.kt` və JVM kontrakt testi eyni sətirləri gözləyir ---
+
+def test_signed_message_formats_match_the_cross_language_vectors():
+    assert AuthService.pair_message("ABCD2345") == b"naymera-pair|ABCD2345"
+    assert AuthService.step_up_message("c1", "n1", "approval", "id1", "ab" * 32, "approve") == \
+        ("naymera-step-up|c1|n1|approval|id1|" + "ab" * 32 + "|approve").encode()
+    vectors = (ROOT / "android" / "jvm-contract" / "src" / "test" / "kotlin" / "MessagesTest.kt").read_text(encoding="utf-8")
+    assert 'naymera-pair|ABCD2345' in vectors and 'naymera-step-up|c1|n1|approval|id1|' in vectors

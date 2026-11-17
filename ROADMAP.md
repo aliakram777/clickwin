@@ -1,6 +1,6 @@
 # NAYMERA — Məhsul yol xəritəsi
 
-Tarix: 2026-11-17 · Əsas: `claude/stage12-research-intelligence` (mərhələ 1–12; Mərhələ 13–14 üzərində işlənir; PR #1–#12 zəncirvari açıqdır, birləşdirilməyib).
+Tarix: 2026-11-17 · Əsas: `claude/stage12-research-intelligence` (mərhələ 1–12; Mərhələ 13–15 üzərində işlənir; PR #1–#12 zəncirvari açıqdır, birləşdirilməyib).
 
 Bu sənəd plandır, vədi yox. Gəlir, qazanc və ya gəlirli nəticə haqqında heç bir iddia yoxdur; trading itkiyə səbəb ola bilər
 (bax: bölmə 6).
@@ -207,3 +207,8 @@ Android (səs/mətn) → tapşırıq qəbulu → spesifikasiya və plan (LLM TƏ
 - Backend: açıq açarlı cihaz cütləşməsi (Keystore P-256, sahiblik sübutu), imza ilə step-up, `/v1/capabilities` (mock/real fərqi), server qoruyucuları; real HTTP üzərində inteqrasiya testləri — **hazırdır və testlənib (852 test)**.
 - Android: Keystore + biometrik imza, real HTTP müştərisi (timeout/backoff/xəta növləri), Əsas/Söhbət/Yaddaş/Bildirişlər/Agentlər/Tarixçə/Ayarlar, qaranlıq tema, az/en/ru/tr — yazılıb, **APK build EDİLMƏYİB və cihazda sınanmayıb** (Android SDK yoxdur).
 - Növbəti: sahibin maşınında build və cihaz/emulyator sınağı; sonra real səs, FCM, real LLM və agent icraçısı (hamısı sahib təsdiqi tələb edir).
+
+## Mərhələ 15 — Android build hazırlığı (status)
+- **APK build edilmədi**: `dl.google.com` bloklu, Android SDK yoxdur (mühit dəyişikliyi təklifi sahib tərəfindən rədd edildi). Maneə, tələb olunan versiyalar və yerli addımlar `android/BUILD_STATUS.md`-dədir; imzalama/yayımlama qurulmayıb.
+- Audit (`android/AUDIT.md`), JVM kontrakt layihəsi (Android-dan asılı olmayan Kotlin qatı həqiqətən kompilyasiya olundu, həqiqi backend ilə 27 test keçdi), telefon sınağı planı (`android/DEVICE_TEST.md`).
+- Növbəti: sahibin maşınında `assembleDebug` və `DEVICE_TEST.md` sınağı; sonra real səs, FCM, real LLM/agent icraçısı və imzalama (hamısı sahib qərarı).
