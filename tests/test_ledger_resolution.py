@@ -144,7 +144,7 @@ def test_production_owner_step_up_resolves_and_a_revoked_device_cannot(tmp_path)
     svc = build_app(tmp_path / "data", owner_id="owner", global_limit=5.0, trust=anchor)
     dev = pair(svc.auth)
     p = types.SimpleNamespace(stack=svc.factory, dev=dev)
-    led = svc.reconciler._ledger
+    led = svc.ledger
     for op in ("u1", "u2"):
         assert led.reserve(op, "agent", 0.5).ok and led.mark_unknown(op)
     assert [e.op_id for e in svc.reconciler.unknown()] == ["u1", "u2"]

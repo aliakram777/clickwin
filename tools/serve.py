@@ -11,11 +11,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from api.bootstrap import build_app  # noqa: E402
 from api.server import DEFAULT_HOST, DEFAULT_PORT, create_server  # noqa: E402
-from runtime.env import build_engines  # noqa: E402
-from runtime.factory_bootstrap import BootstrapError, TrustAnchor, load_signing_config  # noqa: E402
-from safety.ledger import CostLedger  # noqa: E402
+from runtime.factory_bootstrap import BootstrapError  # noqa: E402
+from runtime.production import build_production  # noqa: E402
 
 
 def main() -> int:
@@ -23,22 +21,19 @@ def main() -> int:
     ap.add_argument("--data-dir", default="data/api")
     ap.add_argument("--host", default=DEFAULT_HOST)
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
+    ap.add_argument("--global-limit", type=float, default=0.0, help="ümumi xərc tavanı (AZN); 0 = heç bir ödənişli xərc")
     ap.add_argument("--tls-cert")
     ap.add_argument("--tls-key")
     a = ap.parse_args()
-    d = Path(a.data_dir)
-    d.mkdir(parents=True, exist_ok=True)
-    engines = build_engines(os.environ, log_dir=d, stop_path=d / "STOP", ledger=CostLedger(d / "llm_ledger.db"))
-    for note in engines.notes:
-        print(note)
     try:
-        config = load_signing_config(os.environ)
+        svc, engines, trust = build_production(a.data_dir, os.environ, global_limit=a.global_limit, https=bool(a.tls_cert))
     except BootstrapError as exc:   # qismən/zəif/yanlış açar: açıq xəta, səssiz davam yoxdur
         print(f"imza konfiqurasiyası rədd edildi: {exc}", file=sys.stderr)
         return 2
-    trust = TrustAnchor(config) if config is not None else None
+    for note in engines.notes:
+        print(note)
     print("fabrik/Company imtiyazlı əməliyyatları: " + ("imza açarı yüklənib (qısa ömürlü imzalı etibarnamələr)" if trust else "BAĞLI (NAYMERA_SIGNING_KEY qurulmayıb)"))
-    svc = build_app(d, https=bool(a.tls_cert), cloud_engine=engines.cloud, local_engine=engines.local, trust=trust)
+    print(f"ümumi xərc tavanı (bütün ödənişli çağırışlar üçün TƏK kitab): {a.global_limit}")
     httpd = create_server(svc, a.host, a.port, a.tls_cert, a.tls_key)
     try:
         httpd.serve_forever()

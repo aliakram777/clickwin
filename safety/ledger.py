@@ -10,8 +10,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import secrets
 import sqlite3
 import time
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -93,8 +95,14 @@ def resolution_scope(op_id: str, actual: float | None) -> tuple[str, str]:
 
 
 class CostLedger:
-    def __init__(self, db_path: str | Path = DEFAULT_LEDGER_PATH, *, verifier: Any = None, owners: Iterable[str] = (), clock: Callable[[], float] = time.time) -> None:
-        """`verifier` (yalnız yoxlama: `check_principal`) və `owners` yalnız naməlum rezervlərin sahib təsdiqi ilə həllində (`resolve_unknown`) istifadə olunur; verilməyibsə həll BAĞLIDIR."""
+    def __init__(self, db_path: str | Path = DEFAULT_LEDGER_PATH, *, verifier: Any = None, owners: Iterable[str] = (), clock: Callable[[], float] = time.time,
+                 global_limit: float | None = None) -> None:
+        """`verifier` (yalnız yoxlama: `check_principal`) və `owners` yalnız naməlum rezervlərin sahib təsdiqi ilə həllində (`resolve_unknown`) istifadə olunur; verilməyibsə həll BAĞLIDIR.
+        `global_limit`: bu kitabın ÜMUMİ xərc tavanı (dəyişməzdir). Hər `reserve` (Broker, GuardedLLM, agent və sistem çağırışları) çağıranın verdiyi limitlə bu tavanın KİÇİYİ ilə yoxlanılır,
+        ona görə heç bir çağıran (limit verməyi unudan sistem söhbəti daxil) tavanı aşa bilməz."""
+        if global_limit is not None:
+            _check_limit("global_limit", global_limit)
+        self._global_cap = None if global_limit is None else float(global_limit)
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._verifier, self._owners, self._clock = verifier, frozenset(owners), clock
@@ -102,6 +110,10 @@ class CostLedger:
         self._conn.execute(_SCHEMA)
         self._conn.execute("CREATE TABLE IF NOT EXISTS ledger_used_credentials (nonce TEXT PRIMARY KEY, op_id TEXT NOT NULL, used_at REAL NOT NULL)")
         self._migrate()
+
+    @property
+    def global_limit(self) -> float | None:
+        return self._global_cap
 
     def close(self) -> None:
         self._conn.close()
@@ -156,6 +168,8 @@ class CostLedger:
         if group_limit is not None:
             _check_text("group_prefix", group_prefix)
         amount = float(amount)
+        if self._global_cap is not None:
+            global_limit = self._global_cap if global_limit is None else min(float(global_limit), self._global_cap)
         with self._tx():
             row = self._conn.execute("SELECT status FROM costs WHERE op_id = ?", (op_id,)).fetchone()
             if row is not None and row[0] != "released":
@@ -194,17 +208,18 @@ class CostLedger:
         return Reservation("reserved")
 
     def commit(self, op_id: str, actual: float) -> bool:
-        """Faktiki xərci yazır (yalnız reserved-dən). İkinci dəfə False."""
+        """Faktiki xərci yazır (yalnız NORMAL `reserved`-dən). İkinci dəfə False. NAMƏLUM rezervi təsdiqləməz (False): yalnız `resolve_unknown` (dəqiq sahib təsdiqi) həll edir."""
         _check_amount("faktiki xərc", actual)
         cur = self._conn.execute(
-            "UPDATE costs SET amount = ?, status = 'committed', unknown = 0"
-            " WHERE op_id = ? AND status = 'reserved'", (float(actual), op_id))
+            "UPDATE costs SET amount = ?, status = 'committed'"
+            " WHERE op_id = ? AND status = 'reserved' AND unknown = 0", (float(actual), op_id))
         return cur.rowcount == 1
 
     def release(self, op_id: str) -> bool:
+        """Normal rezervi azad edir. NAMƏLUM rezervi azad etməz (False): yalnız `resolve_unknown`."""
         cur = self._conn.execute(
-            "UPDATE costs SET amount = 0, status = 'released', unknown = 0"
-            " WHERE op_id = ? AND status = 'reserved'", (op_id,))
+            "UPDATE costs SET amount = 0, status = 'released'"
+            " WHERE op_id = ? AND status = 'reserved' AND unknown = 0", (op_id,))
         return cur.rowcount == 1
 
     def mark_unknown(self, op_id: str) -> bool:
@@ -358,26 +373,68 @@ def reconcile(ledger: CostLedger, audit_path: str | Path) -> ReconcileReport:
     return rep
 
 
+_PORT_BACKENDS: dict[str, "CostLedger"] = {}                 # modul reyestri: LedgerPort obyektində kitaba istinad YOXDUR
+_PORT_METHODS = ("reserve", "commit", "release", "mark_unknown", "has", "agent_total", "total", "reserved_total", "by_agent", "entries", "unknown_entries", "stale_reserved")
+
+
+class LedgerPort:
+    """İcra qatı (Broker, Orchestrator, GuardedLLM, proaktiv analiz) üçün DAR kitab səthi: yalnız rezerv/hesablaşma/oxuma. `record`, `expire_stale`, `resolve_unknown`, `close` və SQLite
+    bağlantısı BU obyektdə YOXDUR; ApiApp-dan çatılan obyekt qrafında xam `CostLedger` olmur. Obyektdə kitaba istinad yoxdur (yalnız təsadüfi simvol açar).
+    DÜRÜST QEYD: bu proses-daxili sarğıdır (arxa uc modul reyestrindədir), ixtiyari proses-daxili koda qarşı sərhəd DEYİL; yalnız səthi daraldır və səhvən genişlənməyə qarşı testlə qorunur."""
+    __slots__ = ("_token", "__weakref__")
+
+    def __init__(self, ledger: "CostLedger") -> None:
+        token = secrets.token_hex(16)
+        _PORT_BACKENDS[token] = ledger
+        object.__setattr__(self, "_token", token)
+        weakref.finalize(self, _PORT_BACKENDS.pop, token, None)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("dəyişdirilə bilməz")
+
+    @property
+    def global_limit(self) -> float | None:
+        return _PORT_BACKENDS[self._token].global_limit
+
+
+def _port_method(name: str) -> Callable[..., Any]:
+    def method(self: LedgerPort, *a: Any, **k: Any) -> Any:
+        return getattr(_PORT_BACKENDS[self._token], name)(*a, **k)
+    method.__name__ = name
+    return method
+
+
+for _name in _PORT_METHODS:
+    setattr(LedgerPort, _name, _port_method(_name))
+
+
+_RECONCILER_BACKENDS: dict[str, "CostLedger"] = {}      # modul reyestri: reconciler obyektində kitaba istinad YOXDUR (yalnız təsadüfi simvol açar)
+
+
 class LedgerReconciler:
     """Sahib uzlaşdırması üçün DAR səth (etibarlı server kodu): naməlum rezervləri göstərir, step-up əhatəsini hesablayır və YALNIZ sahib təsdiqi ilə həll edir.
-    `reserve/commit/release` kimi yazma imkanları YOXDUR."""
-    __slots__ = ("_ledger",)
+    Obyektdə `CostLedger` istinadı və `reserve/commit/release/record` kimi yazma imkanı YOXDUR (yalnız təsadüfi simvol açar). DÜRÜST QEYD: bu proses-daxili sarğıdır, ixtiyari
+    proses-daxili koda qarşı sərhəd DEYİL (arxa uc modul reyestrindədir)."""
+    __slots__ = ("_token", "__weakref__")
 
     def __init__(self, ledger: CostLedger) -> None:
-        object.__setattr__(self, "_ledger", ledger)
+        token = secrets.token_hex(16)
+        _RECONCILER_BACKENDS[token] = ledger
+        object.__setattr__(self, "_token", token)
+        weakref.finalize(self, _RECONCILER_BACKENDS.pop, token, None)
 
     def __setattr__(self, name: str, value: Any) -> None:
         raise AttributeError("dəyişdirilə bilməz")
 
     def unknown(self) -> list[LedgerEntry]:
-        return self._ledger.unknown_entries()
+        return _RECONCILER_BACKENDS[self._token].unknown_entries()
 
     @staticmethod
     def scope(op_id: str, actual: float | None) -> tuple[str, str]:
         return resolution_scope(op_id, actual)
 
     def resolve(self, op_id: str, actual: float | None, approval: Any) -> bool:
-        return self._ledger.resolve_unknown(op_id, actual, approval)
+        return _RECONCILER_BACKENDS[self._token].resolve_unknown(op_id, actual, approval)
 
 
 def log_denial(audit_path: str | Path, agent: str, permission: str, cost: float,

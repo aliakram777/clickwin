@@ -27,7 +27,7 @@ from api.jobs import JobService
 from safety.approvals import ApprovalService
 from runtime.brokered_llm import BrokeredRouter
 from runtime.factory_bootstrap import FactoryStack, TrustAnchor
-from safety.ledger import CostLedger, LedgerReconciler
+from safety.ledger import CostLedger, LedgerPort, LedgerReconciler
 
 
 def _no_runner(spec: Any, data: dict) -> dict:
@@ -46,11 +46,14 @@ class Services:
     data_dir: Path
     factory: FactoryStack | None = None   # yalnız etibarlı server kodu; agentlərə verilmir
     reconciler: LedgerReconciler | None = None   # naməlum rezervlərin sahib təsdiqi ilə həlli (yalnız etibarlı server kodu)
+    ledger: CostLedger | None = None             # TƏK paylaşılan xərc kitabı (Broker, büdcə siyasəti, Cloud LLM, uzlaşdırma): etibarlı server kodu; ApiApp-a verilmir
 
 
 def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: float = 0.0,
               https: bool = False, cloud_engine: Any = None, local_engine: Any = None, trust: TrustAnchor | None = None,
-              agent_isolation: dict | None = None) -> Services:
+              agent_isolation: dict | None = None, ledger: CostLedger | None = None) -> Services:
+    """`ledger`: istehsalda Cloud mühərriki ilə PAYLAŞILAN tək kitab (`runtime/production.py`). Verilibsə onun ümumi tavanı `global_limit`-ə bərabər və doğrulayıcısı `trust.verifier` olmalıdır:
+    əks halda ikinci/uyğunsuz kitab səssizcə qəbul olunmur (`ValueError`). Verilməyibsə `ledger.db` burada yaradılır."""
     d = Path(data_dir)
     d.mkdir(parents=True, exist_ok=True)
     os.chmod(d, 0o700)   # DB/audit/açar faylları yalnız server istifadəçisinə: agent prosesi (başqa uid) onlara çata bilməz
@@ -58,8 +61,16 @@ def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: fl
     reg = Registry(d / "naymera.db")
     company = Company(reg, d / "company.db", audit, owners={owner_id}, verifier=trust.verifier if trust is not None else None)
     events = EventStore(d / "events.db")
-    ledger = CostLedger(d / "ledger.db", verifier=trust.verifier if trust is not None else None, owners={owner_id})
+    verifier = trust.verifier if trust is not None else None
+    if ledger is None:
+        ledger = CostLedger(d / "ledger.db", verifier=verifier, owners={owner_id}, global_limit=global_limit)
+    else:
+        if ledger.global_limit != float(global_limit):
+            raise ValueError("paylaşılan kitabın ümumi tavanı build_app global_limit ilə eyni olmalıdır")
+        if getattr(ledger, "_verifier", None) is not verifier:
+            raise ValueError("paylaşılan kitabın doğrulayıcısı etibar çıpasının doğrulayıcısı olmalıdır (uzlaşdırma eyni açarlarla yoxlanır)")
     approvals = ApprovalService(d / "approvals.db", audit, owners={owner_id}, channels=[ApprovalEventChannel(events)])
+    raw_ledger, ledger = ledger, LedgerPort(ledger)   # icra qatı yalnız DAR `LedgerPort` görür; xam kitab (record/expire_stale/resolve_unknown) yalnız etibarlı server kodundadır
     policy = company.view.budget_policy(global_limit=global_limit)
     orch = Orchestrator(reg, _no_runner, audit_path=audit, stop_path=stop, errors_path=d / "errors.jsonl",
                         ledger=ledger, approvals=approvals.client, policy=policy)
@@ -92,4 +103,4 @@ def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: fl
             global_limit=lambda: policy.global_limit,
             orchestrator_factory=lambda runner: Orchestrator(reg, runner, audit_path=audit, stop_path=stop, errors_path=d / "errors.jsonl",
                                                              ledger=ledger, approvals=approvals.client, policy=policy))
-    return Services(app, auth, approvals, company, memory, events, router, d, stack, LedgerReconciler(ledger))
+    return Services(app, auth, approvals, company, memory, events, router, d, stack, LedgerReconciler(raw_ledger), raw_ledger)

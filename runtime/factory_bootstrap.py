@@ -109,6 +109,26 @@ CONSOLE_OPS = ("spawn", "assign", "cancel_task", "stop", "restart", "archive", "
 _BACKENDS: dict[str, Any] = {}      # modul-səviyyəli reyestr: OwnerConsole obyektində, onun funksiya default/closure/atributlarında fabrikə istinad YOXDUR
 
 
+_REVOKERS: dict[str, Any] = {}      # modul reyestri: dinləyici obyektində KeyringControl istinadı YOXDUR (yalnız təsadüfi simvol açar)
+
+
+class _ChannelRevoker:
+    """`AuthService.revoke_device` dinləyicisi: YALNIZ `stepup:<cihaz>` kanalını ləğv edir. DÜRÜST QEYD: arxa uc modul reyestrindədir, proses-daxili ixtiyari kod üçün sərhəd DEYİL."""
+    __slots__ = ("_token", "__weakref__")
+
+    def __init__(self, control: Any) -> None:
+        token = secrets.token_hex(16)
+        _REVOKERS[token] = control
+        object.__setattr__(self, "_token", token)
+        weakref.finalize(self, _REVOKERS.pop, token, None)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("dəyişdirilə bilməz")
+
+    def __call__(self, device_id: str) -> None:
+        _REVOKERS[self._token].revoke_channel(f"stepup:{device_id}")
+
+
 class OwnerConsole:
     """Sahib tərəfli əməliyyatların dar səthi (etibarlı server kodu üçün). Hər əməliyyat imzalı sahib etibarnaməsi tələb edir (fabrik/Company yoxlayır).
     Obyektdə YALNIZ təsadüfi simvol açar (`_token`) var; `FactoryAdmin/Control`, `AgentFactory`, `Company`, bağlı metod, closure və ya default dəyər YOXDUR.
@@ -225,7 +245,7 @@ class TrustAnchor:
         team = TeamRunner(factory, dispatcher, team_db, audit_path, system=self._signer.system_issuer(), clock=clock)
         gate = OwnerGate(auth, self._signer.owner_issuer(receipt_consumer(auth)))
         # B-4: cihaz ləğv olunanda onun step-up ilə verilmiş BÜTÜN sahib etibarnamələri dərhal ləğv olunur; başlanğıcda artıq ləğv olunmuş cihazlar da tətbiq edilir
-        auth.add_revocation_listener(lambda device_id: self._control.revoke_channel(f"stepup:{device_id}"))
+        auth.add_revocation_listener(_ChannelRevoker(self._control))     # dinləyici TrustAnchor-a, imza obyektinə və KeyringControl-a istinad ETMİR (ApiApp-ın obyekt qrafında yoxdur)
         for dev in auth.list_devices():
             if dev.get("status") != "active":
                 self._control.revoke_channel(f"stepup:{dev['device_id']}")

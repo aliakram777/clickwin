@@ -15,6 +15,7 @@ from agents.registry import Registry
 from agents.spec import AgentSpec
 from agents.workflow import PlanStep
 from safety.approvals import ApprovalService, Principal
+from tests.ledger_helpers import owned_ledger, owner_resolve
 from safety.ledger import CostLedger, reconcile
 
 MOCK = Principal("owner", "mock", "test")
@@ -51,7 +52,7 @@ def env(tmp_path):
         reg.add(AgentSpec(name=f"agent_{x}", purpose="p", tools=[], permissions=["read_files", "publish"],
                           inputs=["sorgu"], outputs=["netice"], cost_limit=50.0), f"dept_{x}")
     audit = tmp_path / "audit.jsonl"
-    ledger = CostLedger(tmp_path / "ledger.db")
+    ledger = owned_ledger(tmp_path / "ledger.db")
     svc = ApprovalService(tmp_path / "approvals.db", audit, owners={"owner"}, allow_mock=True)
     clock = Clock()
 
@@ -150,7 +151,8 @@ def test_crash_inside_a_step_blocks_resume_until_the_owner_reconciles(env):
     assert report.steps[1].needs_reconciliation and "uzlaşdır" in report.steps[1].reason
     assert [e.status for e in ledger.unknown_entries()] == ["reserved"]  # avtomatik silinmir
 
-    ledger.release("j1:b:a0")  # sahib: icra olmayıb/xərc yoxdur
+    assert ledger.release("j1:b:a0") is False
+    assert owner_resolve(ledger, "j1:b:a0", None)  # sahib: icra olmayıb/xərc yoxdur
     runner3, script3, _ = build()
     assert runner3.resume("j1").status == "ok" and script3.calls == ["agent_b", "agent_c"]
 
@@ -191,7 +193,8 @@ def test_unknown_cost_failure_stays_blocked_even_for_retry_until_reconciled(env)
     blocked = runner.resume("j1", retry_failed=True)
     assert blocked.steps[1].status == "skipped" and "uzlaşdır" in blocked.steps[1].reason
     assert script.calls == ["agent_a", "agent_b"]
-    ledger.commit("j1:b:a0", 0.2)  # xərc sahib tərəfindən təsdiqləndi
+    assert ledger.commit("j1:b:a0", 0.2) is False
+    assert owner_resolve(ledger, "j1:b:a0", 0.2)  # xərc sahib tərəfindən təsdiqləndi
     final = runner.resume("j1", retry_failed=True)
     assert final.status == "ok" and "j1:b:a1" in [e.op_id for e in ledger.entries()]
 

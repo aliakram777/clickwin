@@ -9,6 +9,8 @@ permissions:
 
 jobs:
   pytest:
+    # Root olmayan icra: root-tələb edən agent izolyasiya testləri BURADA ATLANIR (xülasədə açıq xəbərdarlıq çıxır).
+    # Buradakı "yaşıl" izolyasiyanın yoxlandığı demək DEYİL: bax `isolation-privileged` işi.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,4 +20,20 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip pytest -r requirements.txt
       - name: Run tests
-        run: python -m pytest -q
+        run: python -m pytest -q -rs
+
+  isolation-privileged:
+    # Root tələb edən izolyasiya testləri (unikal uid, şəbəkə namespace-i, seccomp, proses ağacı təmizliyi) ATLANMADAN işləyir:
+    # NAYMERA_REQUIRE_PRIVILEGED=1 ilə hər atlanma və ya root olmamaq işi uğursuz edir (tests/conftest.py).
+    # Məhdudiyyət: GitHub-hosted runner konteyner/seccomp siyasətinə görə namespace yaratmağa icazə verməyə bilər; bu halda iş QIRMIZI olur (səssiz keçmir).
+    # Eyni yoxlama əl ilə: tools/run_privileged_isolation_tests.sh (Linux x86_64, sudo).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip pytest -r requirements.txt
+      - name: Run isolation tests as root (no skips allowed)
+        run: PYTHON="$(which python)" tools/run_privileged_isolation_tests.sh

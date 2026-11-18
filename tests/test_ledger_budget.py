@@ -4,12 +4,13 @@ import threading
 
 import pytest
 
+from tests.ledger_helpers import owned_ledger, owner_resolve
 from safety.ledger import CostLedger, reconcile
 
 
 @pytest.fixture
 def led():
-    c = CostLedger(":memory:")
+    c = owned_ledger(":memory:")
     yield c
     c.close()
 
@@ -112,7 +113,9 @@ def test_unknown_cost_keeps_reservation_and_is_flagged(led):
     assert led.total() == pytest.approx(0.5)  # qorunur
     assert led.reserve("o2", "a_agent", 0.6, global_limit=1.0).status == "denied"
     assert [x.op_id for x in led.unknown_entries()] == ["o1"]
-    led.commit("o1", 0.3)  # sonradan məlum oldu
+    assert led.commit("o1", 0.3) is False and led.release("o1") is False     # naməlum rezervi nə commit, nə release həll edir
+    assert led.total() == pytest.approx(0.5)
+    assert owner_resolve(led, "o1", 0.3)  # sonradan məlum oldu: yalnız sahib təsdiqi ilə
     e = entry(led, "o1")
     assert (e.status, e.unknown, e.amount) == ("committed", False, 0.3)
     assert led.unknown_entries() == []
