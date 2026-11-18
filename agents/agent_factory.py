@@ -26,12 +26,13 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 from agents.agent_roles import ROLE_CATALOG, MemoryPolicy, RoleTemplate
-from agents.company import DEPARTMENTS, Authority, Company, CompanyDenied, CompanyView
+from agents.company import DEPARTMENTS, Authority, Company, CompanyDenied, CompanyView, company_scope
 from agents.factory_auth import CredentialError, DispatchAuthorization, Keyring
 from agents.memory import detect_secrets
 from agents.orchestrator import Task
 from agents.research import detect_injection
 from agents.spec import KNOWN_PERMISSIONS, AgentSpec
+from safety.dbconn import connect
 from safety.approvals import Principal
 
 SPEC_COST_CEILING = 5.0   # spec tavanı: real büdcə Company-də (defolt 0.0) və qlobal tavanla məhdudlaşır
@@ -277,6 +278,10 @@ def owner_scope(op: str, *args: Any, **kwargs: Any) -> tuple[str, str, str]:
     return op, subject, hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
+_UNKNOWN_EFFECT = _sha_text("company-effect:unknown")
+_INVALID_EFFECT = _sha_text("company-effect:invalid")
+
+
 class Authed(str):
     """`who()` nəticəsi: `created_by` etiketi (str) + yoxlanmış etibarnamənin özü (`.principal`)."""
     principal: Principal
@@ -298,7 +303,7 @@ class _Core:
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
-        self.conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=30, check_same_thread=False)
+        self.conn = connect(str(db_path), isolation_level=None, timeout=30)
         self.conn.row_factory = sqlite3.Row
         for stmt in _SCHEMA:
             self.conn.execute(stmt)
@@ -352,7 +357,8 @@ class _Core:
         return FactoryDenied(reason, code)
 
     # --- icazə ---
-    def who(self, principal: Principal, op: str, *, owner_only: bool = False, scope: tuple[str, str] | None = None) -> Authed:
+    def who(self, principal: Principal, op: str, *, owner_only: bool = False, scope: tuple[str, str] | None = None,
+            company: Callable[[], str] | None = None) -> Authed:
         """Şəxsiyyət YALNIZ etibarlı açarla imzalanmış, vaxtı keçməmiş və ləğv olunmamış etibarnamə ilə qəbul olunur. Özü yaradılmış `Principal` rədd edilir; yoxlayıcı qurulmayıbsa imtiyazlı
         əməliyyatlar bağlıdır. SAHİB etibarnaməsi yalnız bu DƏQİQ əməliyyata (ad + hədəf + parametr-hash) bağlı olmalıdır və BİR DƏFƏ istifadə olunur (B-3)."""
         if not isinstance(principal, Principal):
@@ -371,8 +377,8 @@ class _Core:
         if principal.id not in self.owners:
             raise self.refuse(op, "unauthorized", "əməliyyatı edən sahib siyahısında deyil", principal)
         sp = principal            # SignedPrincipal (yoxlama keçdi)
-        want = (op, scope[0], scope[1]) if scope is not None else None
-        if want is None or (getattr(sp, "scope_op", ""), getattr(sp, "scope_subject", ""), getattr(sp, "scope_hash", "")) != want:
+        want = (op, scope[0], scope[1], company() if company is not None else "") if scope is not None else None
+        if want is None or (getattr(sp, "scope_op", ""), getattr(sp, "scope_subject", ""), getattr(sp, "scope_hash", ""), getattr(sp, "scope_company", "")) != want:
             raise self.refuse(op, "scope_mismatch", "sahib etibarnaməsi bu dəqiq əməliyyata/hədəfə/parametrlərə bağlı deyil", principal)
         with self.lock:
             try:
@@ -488,12 +494,64 @@ class _Core:
         if per_role >= p.max_per_role:
             raise self.refuse(op, "role_cap", f"rol üzrə agent limiti: {p.max_per_role}", principal)
 
+    @staticmethod
+    def spec_for(role: RoleTemplate, name: str) -> AgentSpec:
+        return AgentSpec(name=name, purpose=role.specialization, tools=[], permissions=sorted(set(role.default_permissions) | set(role.requestable_permissions) | set(role.sensitive_requestable)),
+                         inputs=["sorgu"], outputs=["netice"], cost_limit=SPEC_COST_CEILING)
+
+    def company_effect(self, op: str, *args: Any, **kw: Any) -> str:
+        """Bu sahib əməliyyatının Company-də yaradacağı DƏQİQ təsirin hash-i (`company_scope`); təsir yoxdursa ''. Eyni funksiya `scope()` və `who()` tərəfindən istifadə olunur,
+        ona görə sahibin step-up ilə imzaladığı təsir Company-nin müstəqil yoxladığı təsirlə eynidir. Agent/rol tapılmırsa 'unknown' (heç bir etibarnamə uyğun gəlmir)."""
+        try:
+            op = _SCOPE_ALIASES.get(op, op)
+            if op == "spawn":
+                role = ROLE_CATALOG.get(args[0]) if isinstance(args[0], str) else None
+                return company_scope("register_baseline_agent", self.spec_for(role, "placeholder_agent"), role.department, role.title_az) if role else _UNKNOWN_EFFECT
+            if op == "create_agent":
+                role = ROLE_CATALOG.get(args[0]) if isinstance(args[0], str) else None
+                if role is None:
+                    return _UNKNOWN_EFFECT
+                authority = Authority(frozenset(kw.get("permissions", ("read_files",))), bool(kw.get("sensitive_ok", False)), frozenset(kw.get("delegate_to", ())),
+                                      float(kw.get("max_task_cost", 0.0)))
+                return company_scope("register_agent", self.spec_for(role, "placeholder_agent"), role.department, role.title_az, authority, float(kw.get("budget", 0.0)))
+            if op in ("stop", "restart", "archive", "grant", "set_budget"):
+                row = self.row(args[0]) if isinstance(args[0], str) else None
+                if row is None:
+                    return _UNKNOWN_EFFECT
+                name = row["name"]
+                if op == "stop":
+                    return company_scope("suspend", name)
+                if op == "restart":
+                    return company_scope("resume", name)
+                if op == "archive":
+                    return company_scope("retire", name)
+                if op == "set_budget":
+                    return company_scope("set_budget", name, float(args[1]))
+                ca = self.company_view.get(name)
+                return company_scope("set_authority", name, Authority(frozenset(kw["permissions"]), bool(kw.get("sensitive_ok", False)),
+                                                                     frozenset(kw.get("delegate_to", ())) | (ca.authority.delegate_to if ca else frozenset()),
+                                                                     float(kw.get("max_task_cost", 0.0))))
+            if op == "resolve_request":
+                if not args[1]:
+                    return ""                                                                  # rədd: Company dəyişikliyi yoxdur
+                with self.lock:
+                    r = self.conn.execute("SELECT * FROM factory_requests WHERE request_id = ?", (args[0],)).fetchone() if isinstance(args[0], str) else None
+                row = self.row(r["agent_id"]) if r is not None else None
+                if r is None or row is None:
+                    return _UNKNOWN_EFFECT
+                ca = self.company_view.get(row["name"])
+                perms = (ca.authority.permissions if ca else frozenset()) | {r["permission"]}
+                return company_scope("set_authority", row["name"], Authority(frozenset(perms), ca.authority.sensitive_ok if ca else False,
+                                                                            ca.authority.delegate_to if ca else frozenset(), ca.authority.max_task_cost if ca else 0.0))
+        except Exception:  # noqa: BLE001 — yanlış giriş: heç bir etibarnamə uyğun gəlməyən sabit dəyər (əməliyyatın özü sonra rədd edilir)
+            return _INVALID_EFFECT
+        return ""
+
     def new_agent(self, role: RoleTemplate, principal: Principal, created_by: str, register: Callable[[AgentSpec], Any]) -> AgentRecord:
         """`register(spec)` imtiyazlı (Company.admin) çağırışdır və yalnız `FactoryControl/FactoryAdmin` tərəfindən verilir; nüvə `Company.admin`-ə sahib deyil."""
         agent_id = "agt_" + secrets.token_hex(4)
         name = f"{role.role_id}_{secrets.token_hex(3)}"
-        spec = AgentSpec(name=name, purpose=role.specialization, tools=[], permissions=sorted(set(role.default_permissions) | set(role.requestable_permissions) | set(role.sensitive_requestable)),
-                         inputs=["sorgu"], outputs=["netice"], cost_limit=SPEC_COST_CEILING)
+        spec = self.spec_for(role, name)
         op = "create_agent"
         self.wrap_company(op, principal, lambda: register(spec))
         ws = (self.root / agent_id).resolve()
@@ -663,14 +721,15 @@ class FactoryControl:
         self._c = core
         self._p = priv
 
-    @staticmethod
-    def scope(op: str, *args: Any, **kwargs: Any) -> tuple[str, str, str]:
-        """Sahibin step-up ilə imzalayacağı `(əməliyyat, hədəf, parametr-hash)` (argumentlər əməliyyata verilənlərlə eynidir, `principal` olmadan)."""
-        return owner_scope(op, *args, **kwargs)
+    def scope(self, op: str, *args: Any, **kwargs: Any) -> tuple[str, str, str, str]:
+        """Sahibin step-up ilə imzalayacağı `(əməliyyat, hədəf, fabrik parametr-hash, şirkət təsiri hash-i)` (argumentlər əməliyyata verilənlərlə eynidir, `principal` olmadan).
+        Cihaz `scope_digest(fabrik hash, şirkət hash)` kompozitini imzalayır; fabrik fabrik hash-ini, Company şirkət hash-ini MÜSTƏQİL yoxlayır."""
+        name, subject, digest = owner_scope(op, *args, **kwargs)
+        return name, subject, digest, self._c.company_effect(name, *args, **kwargs)
 
     def spawn(self, role_id: str, principal: Principal, *, purpose: str = "") -> AgentRecord:
         c, op = self._c, "spawn"
-        created_by = c.who(principal, op, scope=owner_scope(op, role_id, purpose=purpose)[1:])
+        created_by = c.who(principal, op, scope=owner_scope(op, role_id, purpose=purpose)[1:], company=lambda: c.company_effect(op, role_id))
         principal = created_by.principal
         role = ROLE_CATALOG.get(role_id) if isinstance(role_id, str) else None
         if role is None:
@@ -702,7 +761,7 @@ class FactoryControl:
 
     def stop(self, agent_id: str, principal: Principal, reason: str = "") -> AgentRecord:
         c, op = self._c, "stop"
-        principal = c.who(principal, op, scope=owner_scope(op, agent_id, reason)[1:]).principal
+        principal = c.who(principal, op, scope=owner_scope(op, agent_id, reason)[1:], company=lambda: c.company_effect(op, agent_id)).principal
         a = c.must_agent(agent_id, op, principal)
         if a.status != "active":
             raise c.refuse(op, f"agent_{a.status}", "yalnız aktiv agent dayandırıla bilər", principal, agent_id)
@@ -721,7 +780,7 @@ class FactoryControl:
 
     def restart(self, agent_id: str, principal: Principal) -> AgentRecord:
         c, op = self._c, "restart"
-        principal = c.who(principal, op, scope=owner_scope(op, agent_id)[1:]).principal
+        principal = c.who(principal, op, scope=owner_scope(op, agent_id)[1:], company=lambda: c.company_effect(op, agent_id)).principal
         a = c.must_agent(agent_id, op, principal)
         if a.status != "stopped":
             raise c.refuse(op, f"agent_{a.status}" if a.status != "active" else "not_stopped", "yalnız dayandırılmış agent yenidən başladıla bilər", principal, agent_id)
@@ -735,7 +794,7 @@ class FactoryControl:
 
     def archive(self, agent_id: str, principal: Principal) -> AgentRecord:
         c, op = self._c, "archive"
-        principal = c.who(principal, op, scope=owner_scope(op, agent_id)[1:]).principal
+        principal = c.who(principal, op, scope=owner_scope(op, agent_id)[1:], company=lambda: c.company_effect(op, agent_id)).principal
         a = c.must_agent(agent_id, op, principal)
         if a.status not in ("active", "stopped"):
             raise c.refuse(op, f"agent_{a.status}", "agent artıq arxivlənib və ya silinib", principal, agent_id)
@@ -755,7 +814,9 @@ class FactoryAdmin(FactoryControl):
                      delegate_to: Sequence[str] = (), budget: float = 0.0, max_task_cost: float = 0.0) -> AgentRecord:
         c, op = self._c, "create_agent"
         created_by = c.who(principal, op, owner_only=True, scope=owner_scope(op, role_id, permissions=permissions, sensitive_ok=sensitive_ok, delegate_to=delegate_to,
-                                                                            budget=budget, max_task_cost=max_task_cost)[1:])
+                                                                            budget=budget, max_task_cost=max_task_cost)[1:],
+                         company=lambda: c.company_effect(op, role_id, permissions=permissions, sensitive_ok=sensitive_ok, delegate_to=delegate_to, budget=budget,
+                                                          max_task_cost=max_task_cost))
         principal = created_by.principal
         role = ROLE_CATALOG.get(role_id) if isinstance(role_id, str) else None
         if role is None:
@@ -778,7 +839,9 @@ class FactoryAdmin(FactoryControl):
               delegate_to: Sequence[str] = (), max_task_cost: float = 0.0) -> AgentRecord:
         c, op = self._c, "grant"
         principal = c.who(principal, op, owner_only=True, scope=owner_scope(op, agent_id, permissions=permissions, sensitive_ok=sensitive_ok, delegate_to=delegate_to,
-                                                                           max_task_cost=max_task_cost)[1:]).principal
+                                                                           max_task_cost=max_task_cost)[1:],
+                              company=lambda: c.company_effect(op, agent_id, permissions=permissions, sensitive_ok=sensitive_ok, delegate_to=delegate_to,
+                                                               max_task_cost=max_task_cost)).principal
         a = c.must_agent(agent_id, op, principal)
         role = ROLE_CATALOG[a.role_id]
         if not set(permissions) <= set(role.default_permissions) | set(role.requestable_permissions) | set(role.sensitive_requestable):
@@ -792,7 +855,7 @@ class FactoryAdmin(FactoryControl):
 
     def set_budget(self, agent_id: str, budget: float, principal: Principal) -> AgentRecord:
         c, op = self._c, "set_budget"
-        principal = c.who(principal, op, owner_only=True, scope=owner_scope(op, agent_id, budget)[1:]).principal
+        principal = c.who(principal, op, owner_only=True, scope=owner_scope(op, agent_id, budget)[1:], company=lambda: c.company_effect(op, agent_id, budget)).principal
         a = c.must_agent(agent_id, op, principal)
         if not _finite(budget) or budget > c.policy.global_budget_cap + 1e-9:
             raise c.refuse(op, "budget_cap", "büdcə qlobal tavanı aşır (tavanı yalnız sahib qaldırır)", principal, agent_id)
@@ -820,7 +883,7 @@ class FactoryAdmin(FactoryControl):
 
     def resolve_request(self, request_id: str, approve: bool, principal: Principal) -> PermissionRequest:
         c, op = self._c, "resolve_request"
-        principal = c.who(principal, op, owner_only=True, scope=owner_scope(op, request_id, approve)[1:]).principal
+        principal = c.who(principal, op, owner_only=True, scope=owner_scope(op, request_id, approve)[1:], company=lambda: c.company_effect(op, request_id, approve)).principal
         with c.lock:
             row = c.conn.execute("SELECT * FROM factory_requests WHERE request_id = ?", (request_id,)).fetchone()
             if row is None or row["state"] != "pending":

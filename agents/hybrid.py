@@ -29,6 +29,7 @@ from agents.llm import (LLMBlocked, LLMBudgetExceeded, LLMError, LLMResult, LLMT
                         redact)
 from agents.local_models import LocalModelSpec, ResourceGuard
 from agents.memory import CATEGORIES, MemoryRecord, detect_secrets, untrusted_context
+from safety.dbconn import connect
 
 KINDS = ("chat", "plan", "summarize", "classify")
 CONSENT_SCOPES = ("cloud_paid_use", "cloud_data_transfer", "local_model_download", "local_resource_use")
@@ -349,7 +350,7 @@ class AiStore:
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._c = sqlite3.connect(str(db_path), isolation_level=None, timeout=30, check_same_thread=False)
+        self._c = connect(str(db_path), isolation_level=None, timeout=30)
         self._c.row_factory = sqlite3.Row
         for stmt in (
             "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",

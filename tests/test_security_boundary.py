@@ -23,6 +23,8 @@ from api.bootstrap import build_app
 from api.owner_gate import OwnerGate
 from runtime.factory_bootstrap import BootstrapError, FactoryStack, TrustAnchor, load_signing_config
 from safety.approvals import Principal
+from agents.company import company_scope
+from agents.factory_auth import scope_digest
 from tests.factory_keys import DISPATCHER, KEY_ID, OWNER, SEED, SIGNER, SYSTEM, T0, owner_cred, ring, ring_with_control, trust
 from tests.test_agent_runtime import task, world  # noqa: F401  (fixture)
 from tests.test_api_auth import H, pair
@@ -241,14 +243,14 @@ def test_company_rejects_expired_revoked_and_wrong_role_credentials(company):
     with pytest.raises(CompanyDenied) as e:
         c.admin.set_budget("victim", 1.0, DISPATCHER)                              # imzalıdır, amma dispetçer rolu
     assert e.value.code == "role_not_allowed"
-    short = owner_cred("set_budget", "victim", ttl=30)
+    short = owner_cred("set_budget", "victim", ttl=30, company=company_scope("set_budget", "victim", 1.0))
     c.admin.set_budget("victim", 1.0, short)
     clock.t = T0 + 31
     with pytest.raises(CompanyDenied) as e:
         c.admin.set_budget("victim", 2.0, short)
     assert e.value.code == "credential_expired"
     clock.t = T0
-    revoked = owner_cred("set_budget", "victim")
+    revoked = owner_cred("set_budget", "victim", company=company_scope("set_budget", "victim", 2.0))
     c.test_control.revoke_credential(revoked.nonce)
     with pytest.raises(CompanyDenied) as e:
         c.admin.set_budget("victim", 2.0, revoked)
@@ -588,17 +590,17 @@ def prod(tmp_path):
     return ns
 
 
-def authenticate(p, op="create_agent", subject="programmer", phash=H, dev=None, challenge_op=None):
+def authenticate(p, op="create_agent", subject="programmer", phash=H, dev=None, challenge_op=None, company=""):
     dev = dev or p.dev
-    ch = p.stack.owner_gate.challenge(dev.device_id, challenge_op or op, subject, phash)
-    proof = dev.sign(ch, "factory:" + (challenge_op or op), subject, phash, "approve")
-    return p.stack.owner_gate.authenticate(dev.device_id, ch.id, op, subject, phash, proof)
+    ch = p.stack.owner_gate.challenge(dev.device_id, challenge_op or op, subject, phash, company)
+    proof = dev.sign(ch, "factory:" + (challenge_op or op), subject, scope_digest(phash, company), "approve")
+    return p.stack.owner_gate.authenticate(dev.device_id, ch.id, op, subject, phash, proof, company)
 
 
 def owner_for(p, op, *args, dev=None, **kwargs):
     """Sahib bu DƏQİQ əməliyyat üçün step-up edir: əhatə `console.scope(...)` ilə (əməliyyata verilən eyni arqumentlər) hesablanır."""
-    _, subject, phash = p.stack.console.scope(op, *args, **kwargs)
-    return authenticate(p, op, subject, phash, dev=dev)
+    _, subject, phash, company = p.stack.console.scope(op, *args, **kwargs)
+    return authenticate(p, op, subject, phash, dev=dev, company=company)
 
 
 def test_P5_production_bootstrap_builds_the_factory_and_exposes_only_restricted_capabilities(prod):
@@ -622,7 +624,7 @@ def test_without_a_trust_anchor_there_is_no_factory_and_company_admin_is_closed(
     svc = build_app(tmp_path / "d", owner_id="owner", global_limit=0.0)
     assert svc.factory is None
     with pytest.raises(CompanyDenied) as e:
-        svc.company.admin.set_department_cost("development", 1.0, owner_cred("set_department_cost", "development"))
+        svc.company.admin.set_department_cost("development", 1.0, owner_cred("set_department_cost", "development", company=company_scope("set_department_cost", "development", 1.0)))
     assert e.value.code == "owner_auth_unavailable"
 
 

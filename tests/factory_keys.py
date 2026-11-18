@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from safety.approvals import Principal
 
-from agents.factory_auth import Keyring, TrustedSigner, validate_signing_seed
+from agents.factory_auth import Keyring, TrustedSigner, scope_digest, validate_signing_seed
 
 T0 = 1_000_000.0          # testlərdəki `Clock` başlanğıcı
 
@@ -48,10 +48,10 @@ def trust(clock) -> SimpleNamespace:
 HASH0 = "0" * 64
 
 
-def owner_cred(op: str, subject: str = "", digest: str = HASH0, owner_id: str = "owner", *, signer=None, ttl: float = 900):
+def owner_cred(op: str, subject: str = "", digest: str = HASH0, owner_id: str = "owner", *, signer=None, ttl: float = 900, company: str = ""):
     """DƏQİQ əhatəli (əməliyyat, hədəf, parametr-hash), YENİ nonce-lu bir-dəfəlik sahib etibarnaməsi (test etibar çıpası ilə). Real yolda bunu yalnız step-up qəbzi verir."""
     issuer = (signer or SIGNER).owner_issuer(lambda r: (owner_id, "dev-" + owner_id, "factory:" + r[0], r[1], r[2]), ttl=ttl)
-    return issuer.from_step_up((op, subject, digest))
+    return issuer.from_step_up((op, subject, scope_digest(digest, company)), digest, company)
 
 
 class OwnerSentinel:
@@ -61,15 +61,15 @@ class OwnerSentinel:
     def __init__(self, owner_id: str) -> None:
         self.owner_id = owner_id
 
-    def mint(self, op: str, subject: str, digest: str):
-        return owner_cred(op, subject, digest, self.owner_id)
+    def mint(self, op: str, subject: str, digest: str, company: str = ""):
+        return owner_cred(op, subject, digest, self.owner_id, company=company)
 
 
 class MockSentinel(OwnerSentinel):
     """`kind="mock"` sahib işarəsi (real sahib təsdiqi DEYİL; fabrik/Company yalnız `allow_mock=True` ilə qəbul edir)."""
 
-    def mint(self, op: str, subject: str, digest: str):
-        return SIGNER.mock_owner_issuer(ttl=900).principal(self.owner_id, "test", (op, subject, digest))
+    def mint(self, op: str, subject: str, digest: str, company: str = ""):
+        return SIGNER.mock_owner_issuer(ttl=900).principal(self.owner_id, "test", (op, subject, digest, company))
 
 
 OWNER_APPROVER = Principal("owner", "human", "console")        # ApprovalService/Gateway üçün (ayrı sistem; fabrik etibarnaməsi deyil)

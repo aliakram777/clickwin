@@ -32,6 +32,7 @@ from agents.factory_auth import SystemIssuer
 from agents.hybrid import HybridRouter
 from agents.memory import detect_secrets
 from agents.spec import KNOWN_PERMISSIONS
+from safety.dbconn import connect
 
 MAX_STAGES = 12
 MAX_GOAL = 1000
@@ -297,7 +298,7 @@ class TeamRunner:
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._c = sqlite3.connect(str(db_path), isolation_level=None, timeout=30, check_same_thread=False)
+        self._c = connect(str(db_path), isolation_level=None, timeout=30)
         self._c.row_factory = sqlite3.Row
         self._c.execute("CREATE TABLE IF NOT EXISTS team_runs (plan_id TEXT PRIMARY KEY, goal TEXT NOT NULL, state TEXT NOT NULL, report_json TEXT NOT NULL, "
                         "created REAL NOT NULL, updated REAL NOT NULL)")
