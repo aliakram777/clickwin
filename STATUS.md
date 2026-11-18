@@ -3,6 +3,10 @@
 Yenilənib: 2026-11-18
 
 ## Cari mərhələ
+Mərhələ 18.8 (Operations) və 18.11 (Android CORE API) — işləyən qat, smoke yoxlanıb, istehsala/ictimai şəbəkəyə QOŞULMAYIB. Ətraflı: [OPS_API.md](OPS_API.md).
+Android MVP M1 (data qatı + CORE step-up challenge yoxlaması + `tools/serve_core_dev.py` loopback dev serveri) — JVM kontrakt testləri real backend ilə keçir; UI/APK hələ YOXDUR, `CoreApiApp` istehsala qoşulmayıb ([ANDROID_MVP_PLAN.md](ANDROID_MVP_PLAN.md), [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)).
+Mərhələ 18.3 (Memory Engine v2) və 18.4 (Reasoning/Planning scaffolds) — işləyən kitabxana qatı, smoke yoxlanılıb, istehsala qoşulmayıb. Ətraflı: [MEMORY_REASONING.md](MEMORY_REASONING.md). Əvvəlki: 18.2-B (`core/`).
+Mərhələ 18.2-B — Goal Store + Kernel Loop (`core/`, `runtime/brokered_core.py`; yalnız L0/L1; hər addım üçün hash-ə bağlı sahib təsdiqi; STOP üstündür; istehsal handler-i, real model/API/şəbəkə/agent kodu icrası YOXDUR; istehsala qoşulmayıb; PR təsdiq gözləyir). Ətraflı: [CORE_KERNEL.md](CORE_KERNEL.md). Əvvəlki: Mərhələ 18.0 (`kernel/`).
 Mərhələ 18.0 — Core Contracts (`kernel/`: Goal, Plan, Event, Capability, ImprovementProposal + OwnerDecision, idempotent SQLite event jurnalı; yalnız müqavilələr, icra/icazə YOXDUR, Stage 17 sərhədlərinə toxunulmayıb; PR təsdiq gözləyir). Ətraflı: [KERNEL_CONTRACTS.md](KERNEL_CONTRACTS.md). Əvvəlki:
 Mərhələ 17 — Real AI runtime və avtonom agent fabrikası (məhdud agent yaradılışı, həyat dövrü, çoxagentli axın, məhsul bünövrəsi; real provayder/alət YOXDUR; APK build EDİLMƏYİB, PR təsdiq gözləyir). Əvvəlki: Mərhələ 16 — Daimi hibrid AI beyni (Cloud + Local; real provayder/model/səs YOXDUR). Əvvəlki: Mərhələ 15 — Android build hazırlığı və audit (APK build EDİLMƏYİB: `dl.google.com` bloklu; Android-dan asılı olmayan Kotlin qatı JVM-də kompilyasiya və həqiqi backend ilə sınanıb; PR təsdiq gözləyir). Əvvəlki PR-lər: #1–#16 (PR #16 CI uğurlu, birləşdirilməyib). Yol xəritəsi: [ROADMAP.md](ROADMAP.md).
 
@@ -126,3 +130,6 @@ Mərhələ 17 — Real AI runtime və avtonom agent fabrikası (məhdud agent ya
 ## Qeyd
 Bu bölmədə gəlir/qazanc haqqında iddia yazılmır.
 - Mərhələ 18.0 / Core Contracts — `kernel/common.py`, `goal.py`, `plan.py`, `events.py`, `capability.py`, `proposal.py`, `eventlog.py`: dəyişməz versiyalı müqavilələr, ciddi sxem, UTC, sirr rədd, etibarsız mətn sərhədi, sahib qərarı məzmun hash-inə bağlı və AYRI, qorunan komponent ⇒ yüksək risk, idempotent append-only jurnal. Testlər: `tests/test_kernel_contracts.py`. Məhdudiyyətlər: KERNEL_CONTRACTS.md (kernel döngüsü/Goal Store/provayder qatı yoxdur; `OwnerDecision` kriptoqrafik doğrulanmır).
+- Mərhələ 18.2-B / Core — `core/ports.py`, `store.py`, `validator.py`, `loop.py`, `runtime/brokered_core.py`, `tools/mutation_check_core.py`. Testlər: `tests/test_core_store.py`, `test_core_loop.py`, `test_core_brokered.py`, `test_core_audit.py`. Məhdudiyyətlər: CORE_KERNEL.md (üz ayrılığı proses-daxilidir; audit zənciri, Memory v2, qiymətləndirmə, scheduler, sandbox sonrakı mərhələlər; root/privileged testlər işlədilməyib).
+- Mərhələ 18.3/18.4 — `memory/` (store, episodes), `reasoning/` (planners, critique, verify), `core/loop.py`-a `observer` portu. Testlər: `tests/test_memory_engine.py`, `tests/test_reasoning.py` (smoke). Məhdudiyyətlər: MEMORY_REASONING.md və KNOWN_LIMITATIONS.md.
+- Mərhələ 18.8/18.11 — `ops/` (audit, scheduler, watchdog, backup), `core/lease.py`, `api/core_api.py`. Testlər: `tests/test_ops.py`, `tests/test_core_api.py` (smoke). Məhdudiyyətlər: OPS_API.md.

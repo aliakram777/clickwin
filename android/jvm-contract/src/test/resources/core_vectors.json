@@ -1,0 +1,50 @@
+{
+ "vectors": [
+  {
+   "challenge_id": "chal_0001",
+   "nonce": "n0nce0001",
+   "action": "core_goal",
+   "subject": "goal_0123456789abcdef",
+   "payload_hash": "0e267abe9907d905ce3665a6a479e93d291fec452e792c9a9fc5a9058a71143b",
+   "decision": "active",
+   "version": 1,
+   "message": "naymera-step-up|chal_0001|n0nce0001|core_goal|goal_0123456789abcdef|0e267abe9907d905ce3665a6a479e93d291fec452e792c9a9fc5a9058a71143b|active"
+  },
+  {
+   "challenge_id": "chal_0002",
+   "nonce": "n0nce0002",
+   "action": "core_goal",
+   "subject": "goal_0123456789abcdef",
+   "payload_hash": "312a46cf22373db3a83910a99ecb6eaca6a32fac2aa63efaa9fd893602ba743d",
+   "decision": "cancelled",
+   "version": 7,
+   "message": "naymera-step-up|chal_0002|n0nce0002|core_goal|goal_0123456789abcdef|312a46cf22373db3a83910a99ecb6eaca6a32fac2aa63efaa9fd893602ba743d|cancelled"
+  },
+  {
+   "challenge_id": "chal_0003",
+   "nonce": "n0nce0003",
+   "action": "core_step",
+   "subject": "plan_0123456789abcdef/a",
+   "payload_hash": "d1e698f3ce4c8f4ce12924aec8d092d2a0112c3fd1019204f7c2499b4e74c753",
+   "decision": "retry",
+   "attempt": 1,
+   "state": "unknown",
+   "plan_id": "plan_0123456789abcdef",
+   "step_id": "a",
+   "message": "naymera-step-up|chal_0003|n0nce0003|core_step|plan_0123456789abcdef/a|d1e698f3ce4c8f4ce12924aec8d092d2a0112c3fd1019204f7c2499b4e74c753|retry"
+  },
+  {
+   "challenge_id": "chal_0004",
+   "nonce": "n0nce0004",
+   "action": "core_step",
+   "subject": "plan_0123456789abcdef/step_b",
+   "payload_hash": "fd2e74bce6e4b3394dc8ebfd62336db91d739bbdf853b56581142a94bb9bd1ca",
+   "decision": "failed",
+   "attempt": 3,
+   "state": "blocked",
+   "plan_id": "plan_0123456789abcdef",
+   "step_id": "step_b",
+   "message": "naymera-step-up|chal_0004|n0nce0004|core_step|plan_0123456789abcdef/step_b|fd2e74bce6e4b3394dc8ebfd62336db91d739bbdf853b56581142a94bb9bd1ca|failed"
+  }
+ ]
+}

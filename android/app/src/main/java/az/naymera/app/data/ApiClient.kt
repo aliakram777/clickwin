@@ -240,6 +240,50 @@ class ApiClient(private val store: TokenStore, private val timeouts: ApiTimeouts
         call("POST", path("/v1/notifications/{key}/ack", "key" to key), "{}", OkOnly.serializer())
     }
 
+    // ---- CORE (Mərhələ M1) ----
+    suspend fun coreStatus(): CoreStatus = call("GET", "/v1/core/status", null, CoreStatus.serializer())
+
+    suspend fun goals(status: String? = null): List<GoalDto> {
+        val q = if (status == null) "?limit=100" else "?limit=100&status=" + java.net.URLEncoder.encode(status, "UTF-8")
+        return call("GET", "/v1/core/goals", null, GoalsResponse.serializer(), query = q).goals
+    }
+
+    /** `clientOp` (8-64 kiçik hərf/rəqəm/_-) idempotentdir: eyni əməliyyatın təkrarı eyni məqsədi qaytarır. Yeni əməliyyat üçün [newClientOp]. */
+    suspend fun createGoal(title: String, description: String, priority: String, clientOp: String): CreateGoalResponse =
+        call("POST", "/v1/core/goals",
+            json.encodeToString(CreateGoalRequest.serializer(), CreateGoalRequest(title, description, priority, clientOp)), CreateGoalResponse.serializer())
+
+    suspend fun goal(id: String): GoalDetail = call("GET", path("/v1/core/goals/{id}", "id" to id), null, GoalDetail.serializer())
+
+    suspend fun goalChallenge(id: String, toStatus: String): GoalChallenge =
+        call("POST", path("/v1/core/goals/{id}/challenge", "id" to id),
+            json.encodeToString(GoalChallengeRequest.serializer(), GoalChallengeRequest(toStatus)), GoalChallenge.serializer())
+
+    suspend fun goalTransition(id: String, req: GoalTransitionRequest): CreateGoalResponse =
+        call("POST", path("/v1/core/goals/{id}/transition", "id" to id),
+            json.encodeToString(GoalTransitionRequest.serializer(), req), CreateGoalResponse.serializer())
+
+    suspend fun awaitingSteps(): List<AwaitingStep> =
+        call("GET", "/v1/core/steps/awaiting", null, AwaitingStepsResponse.serializer()).steps
+
+    suspend fun stepChallenge(planId: String, stepId: String, resolution: String): StepChallenge =
+        call("POST", path("/v1/core/steps/{p}/{s}/challenge", "p" to planId, "s" to stepId),
+            json.encodeToString(StepChallengeRequest.serializer(), StepChallengeRequest(resolution)), StepChallenge.serializer())
+
+    suspend fun stepResolve(planId: String, stepId: String, req: StepResolveRequest): StepResolveResponse =
+        call("POST", path("/v1/core/steps/{p}/{s}/resolve", "p" to planId, "s" to stepId),
+            json.encodeToString(StepResolveRequest.serializer(), req), StepResolveResponse.serializer())
+
+    suspend fun journal(goalId: String? = null, afterSeq: Long = 0): List<JournalEntry> {
+        val q = "?limit=100&after_seq=$afterSeq" + if (goalId == null) "" else "&goal_id=" + java.net.URLEncoder.encode(goalId, "UTF-8")
+        return call("GET", "/v1/core/journal", null, JournalResponse.serializer(), query = q).entries
+    }
+
+    companion object {
+        /** Yeni idempotentlik açarı: UUID (kiçik hərf, tire/rəqəm) — serverin `client_op` formatına uyğundur. */
+        fun newClientOp(): String = java.util.UUID.randomUUID().toString()
+    }
+
     fun decodeNotification(payload: JsonObject): AppNotification =
         json.decodeFromJsonElement(AppNotification.serializer(), payload)
 }

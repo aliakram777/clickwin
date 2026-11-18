@@ -1,7 +1,7 @@
 # CLAUDE.md — NAYMERA
 
 Agent sistemi: CEO agent + şöbə agentləri. Stack: Python 3.12, pytest, SQLite.
-Mərhələ 1-17 hazırdır (18.0: `kernel/` yalnız müqavilələr, icra/icazə YOXDUR — KERNEL_CONTRACTS.md) (PR #22: dəqiq əhatəli sahib etibarnaməsi, ləğv, iplik-təhlükəsiz SQLite, Ledger rezervləri, Broker-li LLM) (17: real AI runtime + agent fabrikası + çoxagentli axın + məhsul bünövrəsi, real provayder/alət YOXDUR; 16: daimi hibrid AI — Cloud+Local, AUTO/CLOUD/LOCAL, real provayder/model/səs YOXDUR; 13-15: Android API, Keystore/biometrik imza ilə step-up, Kotlin/Compose layihəsi, JVM kontrakt sınağı; APK build EDİLMƏYİB — SDK/`dl.google.com` yoxdur; 7: Effect Broker; 8: təsdiq; 9: Tool Runtime; 10: LLM adapter — interfeys və mock; 11: yaddaş və virtual şirkət; 12: internet araşdırması, proaktiv zəka, Android-first interfeyslər). Əsas platforma: Android APK (Telegram əsas deyil): agent yaratma, təhlükəsizlik qapısı, reyestr, orkestrator, CEO agent, xərc kitabı, büdcə siyasəti, asılılıq qrafı və retry (bax: STATUS.md).
+Mərhələ 1-17 hazırdır (18.0: `kernel/` yalnız müqavilələr, icra/icazə YOXDUR — KERNEL_CONTRACTS.md; 18.2-B: `core/` Goal Store + Kernel Loop yalnız L0/L1, istehsal handler-i YOXDUR — CORE_KERNEL.md) (PR #22: dəqiq əhatəli sahib etibarnaməsi, ləğv, iplik-təhlükəsiz SQLite, Ledger rezervləri, Broker-li LLM) (17: real AI runtime + agent fabrikası + çoxagentli axın + məhsul bünövrəsi, real provayder/alət YOXDUR; 16: daimi hibrid AI — Cloud+Local, AUTO/CLOUD/LOCAL, real provayder/model/səs YOXDUR; 13-15: Android API, Keystore/biometrik imza ilə step-up, Kotlin/Compose layihəsi, JVM kontrakt sınağı; APK build EDİLMƏYİB — SDK/`dl.google.com` yoxdur; 7: Effect Broker; 8: təsdiq; 9: Tool Runtime; 10: LLM adapter — interfeys və mock; 11: yaddaş və virtual şirkət; 12: internet araşdırması, proaktiv zəka, Android-first interfeyslər). Əsas platforma: Android APK (Telegram əsas deyil): agent yaratma, təhlükəsizlik qapısı, reyestr, orkestrator, CEO agent, xərc kitabı, büdcə siyasəti, asılılıq qrafı və retry (bax: STATUS.md).
 
 ## Mütləq qaydalar
 
@@ -92,6 +92,20 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 ├── tools/serve.py             # serveri mühit dəyişənlərindən qurulmuş mühərriklərlə işə salır
 ├── KERNEL_CONTRACTS.md        # Mərhələ 18.0: kernel müqavilələri (Goal/Plan/Event/Capability/ImprovementProposal), qaydalar, məhdudiyyətlər
 ├── kernel/                    # Mərhələ 18.0: dəyişməz versiyalı müqavilələr (common/goal/plan/events/capability/proposal) + eventlog.py (SQLite, append-only, idempotent); İCRA/İCAZƏ YOXDUR
+├── CORE_KERNEL.md             # Mərhələ 18.2-B: Goal Store + Kernel Loop (L0/L1), təsdiq bağlılığı, STOP, qəza bərpası, məhdudiyyətlər
+├── core/                      # Mərhələ 18.2-B: ports.py, store.py (SQLite, iki üz: engine/owner), validator.py, loop.py; yan təsir/şəbəkə/env/agent kodu YOXDUR
+├── runtime/core_handlers.py   # Mərhələ 18.5: təhlükəsiz handler-lər (memory.recall/consolidate, report.progress, workspace.list); model/şəbəkə/shell YOXDUR
+├── runtime/brokered_core.py   # Mərhələ 18.2-B: Kernel Loop-un TƏK icra adapteri (Effect Broker + ApprovalClient; handler reyestri boşdur)
+├── tools/mutation_check_core.py # core/ mutasiya yoxlaması (kopyada işləyir; sağ qalan mutant = real boşluq)
+├── MEMORY_REASONING.md        # Mərhələ 18.3/18.4: Memory Engine v2 və Reasoning/Planning scaffolds
+├── memory/                    # Mərhələ 18.3: store.py (SQLite+FTS5, 4 növ, aktor səlahiyyəti, etibar/mənşə, TTL), episodes.py (Kernel Loop observer); LLM yazmır
+├── reasoning/                 # Mərhələ 18.4: planners.py (TemplatePlanner/ModelPlanner), critique.py, verify.py (CriteriaVerifier); icra YOXDUR
+├── ANDROID_MVP_PLAN.md        # Kotlin Android MVP planı (CORE API üzərində; M1 data qatı hazırdır, UI/APK yoxdur)
+├── tools/serve_core_dev.py    # CORE inkişaf serveri: YALNIZ 127.0.0.1 (host seçimi yoxdur), CoreApiApp, demo L1 döngü; istehsal DEYİL
+├── android/…/data/CoreModels.kt, security/CoreChallenge.kt  # CORE DTO-ları + klient tərəfi step-up challenge yoxlaması (jvm-contract: CoreChallengeTest/CoreContractTest, core_vectors.json)
+├── OPS_API.md                 # Mərhələ 18.8/18.11: Operations (audit zənciri, scheduler, watchdog, backup, lease heartbeat) və Android CORE API
+├── ops/                       # Mərhələ 18.8: audit.py (hash zənciri), scheduler.py, watchdog.py, backup.py; xarici şəbəkə/kod icrası YOXDUR
+├── api/core_api.py            # Mərhələ 18.11: CoreApiApp (/v1/core/*, step-up); istehsala QOŞULMAYIB
 ├── AGENT_FACTORY.md           # agent fabrikası, komanda axını, builder bünövrəsi, real AI runtime, məhdudiyyətlər
 ├── .env.example               # boş server mühit dəyişənləri (açar yoxdur)
 ├── runtime/brokered_llm.py    # BrokeredRouter: sistem söhbət/plan LLM çağırışları EffectBroker.run daxilində
@@ -105,7 +119,7 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 ├── safety/tools.py            # Tool Runtime: allowlist, limitlər, SandboxAdapter interfeysi (real OS sandbox YOXDUR)
 ├── safety/workspace.py        # workspace fayl sərhədi (tətbiq səviyyəli) + fs.read/fs.write/fs.list
 ├── safety/ledger.py           # SQLite xərc kitabı: rezerv/təsdiq/azad, limitlər (data/ledger.db)
-└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration/workflow/retry/broker/approvals/approval_broker/workspace/tool_runtime/llm/llm_planner/memory/company/durable/research/proactive/mobile/api_http/api_auth/api_app/api_bootstrap/api_p256/android_integration/android_project/jvm_contract[opt-in]/hybrid_router/hybrid_api/local_models/voice_registry/providers/agent_factory/agent_runtime/factory_hardening/security_boundary/agent_isolation/agent_isolation_hardening/remaining_hardening/locked_connection/ledger_resolution/paid_llm_entry_points/shared_ledger/build_app_engine_ledger/overrun_breaker/unicode_engine_ceiling/local_runtime_bypass/dns_pinning/api_object_graph/isolation_limits/ci_privileged_policy/team/builders/company_suspend/orchestrator_target/kernel_contracts)
+└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration/workflow/retry/broker/approvals/approval_broker/workspace/tool_runtime/llm/llm_planner/memory/company/durable/research/proactive/mobile/api_http/api_auth/api_app/api_bootstrap/api_p256/android_integration/android_project/jvm_contract[opt-in]/hybrid_router/hybrid_api/local_models/voice_registry/providers/agent_factory/agent_runtime/factory_hardening/security_boundary/agent_isolation/agent_isolation_hardening/remaining_hardening/locked_connection/ledger_resolution/paid_llm_entry_points/shared_ledger/build_app_engine_ledger/overrun_breaker/unicode_engine_ceiling/local_runtime_bypass/dns_pinning/api_object_graph/isolation_limits/ci_privileged_policy/team/builders/company_suspend/orchestrator_target/kernel_contracts/core_store/core_loop/core_brokered/core_audit/memory_engine/reasoning/core_handlers/ops/core_api/serve_core_dev/core_signing_flow)
 ```
 
 Yeni kod əlavə olunanda bu xəritəni yenilə.

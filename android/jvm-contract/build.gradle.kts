@@ -10,6 +10,7 @@ val syncSources by tasks.registering(Copy::class) {
         exclude("SessionStore.kt")
     }
     from("../app/src/main/java/az/naymera/app/security/Messages.kt")
+    from("../app/src/main/java/az/naymera/app/security/CoreChallenge.kt")
     into(layout.buildDirectory.dir("generated/app-sources"))
 }
 

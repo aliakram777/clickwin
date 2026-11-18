@@ -114,11 +114,22 @@ def test_api_client_endpoints_exist_on_the_server():
 
 
 def _server_routes():
+    """ApiApp + CoreApiApp (`/v1/core/*`) marşrutları: Android klienti hər ikisini istifadə edir (CoreApiApp istehsala QOŞULMAYIB, dev serveri ilə işləyir)."""
+    import importlib.util
+    import sys
     import tempfile
     from api.bootstrap import build_app
     with tempfile.TemporaryDirectory() as d:
         svc = build_app(Path(d))
-        return {p for _, p, _ in svc.app.router.routes()}
+        routes = {p for _, p, _ in svc.app.router.routes()}
+    spec = importlib.util.spec_from_file_location("serve_core_dev", Path(__file__).resolve().parent.parent / "tools" / "serve_core_dev.py")
+    mod = sys.modules.get("serve_core_dev") or importlib.util.module_from_spec(spec)
+    sys.modules["serve_core_dev"] = mod
+    if not hasattr(mod, "build_core_dev"):
+        spec.loader.exec_module(mod)
+    with tempfile.TemporaryDirectory() as d:
+        dev = mod.build_core_dev(Path(d), demo_loop=False)
+        return routes | {p for _, p, _ in dev.app.router.routes()}
 
 
 def test_kotlin_models_cover_the_server_json_keys():
