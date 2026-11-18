@@ -6,7 +6,7 @@ import socket
 import urllib.error
 import urllib.request
 
-from agents.providers import HttpRequest, HttpResponse, TransportError
+from agents.providers import EndpointError, HttpRequest, HttpResponse, TransportError, register_endpoint_enforcing_transport, validate_endpoint
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -14,12 +14,23 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+@register_endpoint_enforcing_transport
 class UrllibTransport:
-    def __init__(self, max_bytes: int = 1_000_000) -> None:
-        self.max_bytes = max_bytes
+    """`kind` ("cloud" | "private") verilibsə HƏR sorğunun URL-i `validate_endpoint(url, kind)` ilə yoxlanılır və uyğun gəlməyən hədəfə qoşulmadan `TransportError` verilir: `private` nəqliyyat
+    ictimai hosta, `cloud` nəqliyyat isə lokal/özəl hosta GEDƏ BİLMƏZ (fail-closed). `kind=None` yoxlamasızdır (yalnız loopback testləri üçün)."""
+
+    def __init__(self, max_bytes: int = 1_000_000, kind: str | None = None) -> None:
+        if kind not in (None, "cloud", "private"):
+            raise ValueError("kind cloud|private olmalıdır")
+        self.max_bytes, self.kind = max_bytes, kind
         self._opener = urllib.request.build_opener(_NoRedirect)
 
     def __call__(self, r: HttpRequest) -> HttpResponse:
+        if self.kind is not None:
+            try:
+                validate_endpoint(r.url, self.kind)
+            except EndpointError:
+                raise TransportError("endpoint policy violation") from None
         req = urllib.request.Request(r.url, data=r.body, method=r.method, headers=dict(r.headers))
         try:
             with self._opener.open(req, timeout=r.timeout) as resp:

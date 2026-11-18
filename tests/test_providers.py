@@ -57,11 +57,12 @@ def test_bad_cloud_endpoints_are_rejected(url):
         validate_endpoint(url, "cloud")
 
 
-def test_private_endpoints_allow_loopback_and_private_networks_but_public_hosts_need_tls():
+def test_private_endpoints_allow_loopback_and_private_networks_but_never_public_hosts():
     for url in ("http://127.0.0.1:11434", "http://localhost:8080", "http://192.168.1.20:8000", "http://10.1.2.3:9000",
-                "http://172.16.5.4:8000", "http://myserver.local:8000", "https://api.example.com"):
+                "http://172.16.5.4:8000", "http://myserver.local:8000", "http://ollama:11434", "https://nas.lan:8443"):
         validate_endpoint(url, "private")
-    for url in ("http://8.8.8.8", "http://api.example.com", "http://169.254.169.254", "https://u:p@192.168.1.1"):
+    for url in ("http://8.8.8.8", "http://api.example.com", "http://169.254.169.254", "https://u:p@192.168.1.1",
+                "https://api.example.com", "https://api.openai.com/v1", "https://8.8.8.8"):          # ictimai DNS/IP (HTTPS ilə də) LOKAL deyil: ödənişli uzaq servis ola bilər
         with pytest.raises(EndpointError):
             validate_endpoint(url, "private")
 

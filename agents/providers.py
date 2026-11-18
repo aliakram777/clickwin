@@ -42,6 +42,20 @@ class HttpResponse:
 Transport = Callable[[HttpRequest], HttpResponse]
 
 
+_ENFORCING_TRANSPORTS: set[type] = set()      # yalnız `runtime/` nəqliyyat sinifləri (idxal vaxtı) özünü qeyd edir: hər sorğuda `validate_endpoint(url, self.kind)` tətbiq edənlər
+
+
+def register_endpoint_enforcing_transport(cls: type) -> type:
+    """Sinif dekoratoru: `cls` nümunələrinin `kind` atributu ("cloud"/"private") hər sorğuda endpoint siyasəti kimi tətbiq edilir (`runtime/transport.py`)."""
+    _ENFORCING_TRANSPORTS.add(cls)
+    return cls
+
+
+def enforces_endpoint_kind(transport: Any, kind: str) -> bool:
+    """`transport` TAM tipi qeydli endpoint-tətbiq edən nəqliyyatdır və `kind` üçün qurulubdur (ixtiyari callable/alt sinif/ördək tipi → False: fail-closed)."""
+    return type(transport) in _ENFORCING_TRANSPORTS and getattr(transport, "kind", None) == kind
+
+
 class EndpointError(ValueError):
     pass
 
@@ -84,12 +98,12 @@ def validate_endpoint(url: Any, kind: str) -> str:
         if port not in (None, 443):
             raise EndpointError("Cloud endpoint üçün qeyri-standart port")
     else:
+        # `private` YALNIZ həqiqətən lokal/özəl hədəfdir: loopback, özəl şəbəkə IP-si, `localhost`, özəl şəkilçili ad (.local/.lan/.internal/.home.arpa) və ya tək etiketli ad (docker/LAN: `ollama`).
+        # İctimai DNS adı/IP (HTTPS ilə də) ödənişli uzaq servis ola bilər və LokalEngine kimi (ledger-siz, razılıqsız) QƏBUL EDİLMİR: bunun üçün GuardedLLM + paylaşılan CostLedger (kind="cloud") tələb olunur.
         local_net = (ip is not None and (ip.is_loopback or (ip.is_private and not ip.is_link_local))) \
-            or host == "localhost" or host.endswith(_PRIVATE_SUFFIXES)
-        if ip is not None and not local_net:
-            raise EndpointError("ictimai IP ünvanı qadağandır (DNS adı + HTTPS istifadə edin)")
-        if not local_net and scheme != "https":
-            raise EndpointError("ictimai host üçün HTTPS tələb olunur")
+            or host == "localhost" or host.endswith(_PRIVATE_SUFFIXES) or (ip is None and "." not in host)
+        if not local_net:
+            raise EndpointError("lokal endpoint yalnız loopback/özəl şəbəkə/lokal ad ola bilər; ictimai (ödənişli ola bilən) host üçün Cloud provayder + GuardedLLM + paylaşılan CostLedger istifadə edin")
     return f"{scheme}://{auth}{path}"
 
 
@@ -127,6 +141,10 @@ class OpenAICompatibleProvider:
         messages = ([{"role": "system", "content": request.system}] if request.system else []) + [{"role": "user", "content": request.prompt}]
         body = json.dumps({"model": self.model, "messages": messages, "max_tokens": request.max_output_tokens, "temperature": 0,
                            "stream": False}).encode("utf-8")
+        try:        # hər sorğuda yenidən yoxla (atribut dəyişdirilsə belə lokal provayder ictimai hosta getmir): FAIL-CLOSED
+            validate_endpoint(self.base_url, self.kind)
+        except EndpointError:
+            raise LLMProviderError("endpoint siyasəti pozulub: sorğu göndərilmədi", charged=False) from None
         headers = {"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "naymera"}
         if self._key is not None:
             headers["Authorization"] = "Bearer " + self._key.reveal()
@@ -178,6 +196,7 @@ class OpenAICompatLocalRuntime:
     def __init__(self, provider: OpenAICompatibleProvider, languages: Sequence[str] = ("en",), name: str = "private-server") -> None:
         if provider.kind != "private":
             raise ValueError("lokal runtime yalnız şəxsi endpoint ilə işləyir")
+        validate_endpoint(provider.base_url, "private")      # lokal runtime yalnız həqiqətən lokal/özəl endpoint-lə (ictimai/ödənişli uzaq servis YOX)
         self.provider, self.languages, self.name = provider, tuple(languages), name
         self.model = provider.model
 

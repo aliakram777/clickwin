@@ -10,6 +10,7 @@ from api.bootstrap import build_app
 from runtime.env import build_engines
 from runtime.production import build_production
 from safety.ledger import CostLedger, LedgerPort
+from tests.engine_support import trust_test_types  # noqa: F401  (fixture)
 from tests.test_hybrid_router import Fake
 from tests.test_providers import FakeTransport, env as cloud_env, ok_body
 
@@ -60,12 +61,13 @@ def test_real_engine_on_the_same_backend_is_accepted_via_port_or_raw_ledger(tmp_
         assert svc.ledger is shared
 
 
-def test_mock_and_not_configured_engines_need_no_ledger(tmp_path):
+def test_mock_and_not_configured_engines_need_no_ledger(tmp_path, trust_test_types):
+    trust_test_types(Fake)
     build_app(tmp_path / "d1", cloud_engine=CloudEngine(None), local_engine=LocalEngine(None))
     mock = build_engines({"NAYMERA_CLOUD_PROVIDER": "mock"}, log_dir=tmp_path, stop_path=tmp_path / "STOP", ledger=None)
     assert mock.cloud.status().is_mock is True
     build_app(tmp_path / "d2", cloud_engine=mock.cloud, local_engine=mock.local)
-    build_app(tmp_path / "d3", cloud_engine=Fake("cloud", is_mock=True), local_engine=Fake("local", state="not_configured"), allow_unaudited_engines=True)     # test fake: yalnız açıq bayrakla
+    build_app(tmp_path / "d3", cloud_engine=Fake("cloud", is_mock=True), local_engine=Fake("local", state="not_configured"))     # test fake: yalnız test reyestri ilə
 
 
 def test_build_production_remains_the_working_canonical_path(tmp_path):

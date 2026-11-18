@@ -14,6 +14,7 @@ from agents.hybrid import RoutedLLM
 from api.bootstrap import build_app
 from runtime.brokered_llm import BrokeredRouter
 from safety.execution_context import broker_context, in_broker
+from tests.engine_support import trust_test_types  # noqa: F401  (fixture)
 from tests.test_agent_runtime import task, world  # noqa: F401  (fixture)
 from tests.test_hybrid_router import Fake
 
@@ -86,13 +87,14 @@ class SpyCloud(Fake):
         return super().generate(prompt, system, request_id)
 
 
-def _svc(tmp_path, cloud):
-    return build_app(tmp_path / "data", owner_id="owner", global_limit=5.0, cloud_engine=cloud, local_engine=Fake("local", state="not_configured"), allow_unaudited_engines=True)
+def _svc(tmp_path, cloud, register):
+    register(type(cloud), Fake)
+    return build_app(tmp_path / "data", owner_id="owner", global_limit=5.0, cloud_engine=cloud, local_engine=Fake("local", state="not_configured"))
 
 
-def test_production_chat_reaches_the_engine_only_inside_the_broker_with_an_audit_trail(tmp_path):
+def test_production_chat_reaches_the_engine_only_inside_the_broker_with_an_audit_trail(tmp_path, trust_test_types):
     cloud = SpyCloud()
-    svc = _svc(tmp_path, cloud)
+    svc = _svc(tmp_path, cloud, trust_test_types)
     out = svc.app.chat.send("x" * 900)
     assert cloud.calls == 1 and cloud.in_broker == [True], out
     audit = [json.loads(x) for x in (tmp_path / "data" / "audit.jsonl").read_text().splitlines()]
@@ -102,8 +104,8 @@ def test_production_chat_reaches_the_engine_only_inside_the_broker_with_an_audit
     assert cloud.calls == 1                                                                           # stop bayrağı: mühərrikə çatmır
 
 
-def test_production_chat_and_planner_use_the_brokered_router_not_the_raw_one(tmp_path):
-    svc = _svc(tmp_path, SpyCloud())
+def test_production_chat_and_planner_use_the_brokered_router_not_the_raw_one(tmp_path, trust_test_types):
+    svc = _svc(tmp_path, SpyCloud(), trust_test_types)
     planner = svc.app.jobs.planner
     assert isinstance(planner.client, RoutedLLM) and isinstance(planner.client.router, BrokeredRouter)
     chat_router = svc.app.chat.engine.router

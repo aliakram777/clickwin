@@ -45,11 +45,11 @@ def build_engines(env: Mapping[str, str], *, log_dir: str | Path, stop_path: str
     return RuntimeEngines(cloud, local, tuple(notes))
 
 
-def _transport(transport: Transport | None) -> Transport:
+def _transport(transport: Transport | None, kind: str) -> Transport:
     if transport is not None:
         return transport
     from runtime.transport import UrllibTransport  # gec idxal: real şəbəkə yalnız lazım olduqda
-    return UrllibTransport()
+    return UrllibTransport(kind=kind)               # hər sorğuda endpoint siyasəti: lokal nəqliyyat ictimai hosta, Cloud nəqliyyatı lokal hosta getmir
 
 
 def _build_cloud(env: Mapping[str, str], log_dir: Path, stop_path: Path, transport: Transport | None, ledger: Any,
@@ -93,7 +93,7 @@ def _build_cloud(env: Mapping[str, str], log_dir: Path, stop_path: Path, transpo
     if problems:
         notes.append("cloud: qurulmayıb — " + "; ".join(problems))
         return CloudEngine(None)
-    provider = OpenAICompatibleProvider(base, cfg.model, cfg.api_key, _transport(transport), kind="cloud")
+    provider = OpenAICompatibleProvider(base, cfg.model, cfg.api_key, _transport(transport, "cloud"), kind="cloud")
     cfg = replace(cfg, provider="openai_compat", price_in_per_1k=price_in, price_out_per_1k=price_out, cost_limit=limit)
     notes.append("cloud: qurulub (real provayder); istifadə üçün cloud_paid_use razılığı tələb olunur")
     return CloudEngine(GuardedLLM(provider, cfg, log_path=log_dir / "llm.jsonl", stop_path=stop_path, ledger=ledger))
@@ -107,9 +107,9 @@ def _build_local(env: Mapping[str, str], transport: Transport | None, notes: lis
     model = (env.get("NAYMERA_LOCAL_AI_MODEL") or "local-model").strip()
     langs = tuple(x.strip() for x in (env.get("NAYMERA_LOCAL_AI_LANGUAGES") or "en").split(",") if x.strip()) or ("en",)
     try:
-        provider = OpenAICompatibleProvider(url, model, None, _transport(transport), kind="private", name="local_openai_compat")
+        provider = OpenAICompatibleProvider(url, model, None, _transport(transport, "private"), kind="private", name="local_openai_compat")
     except (EndpointError, ValueError) as exc:
-        notes.append(f"local: qurulmayıb — {str(exc)[:80]}")
+        notes.append(f"local: qurulmayıb — {str(exc)[:160]}")
         return LocalEngine(None)
     notes.append("local: şəxsi server qoşulub (real server; modelin yüklənməsi serverdən asılıdır)")
     return LocalEngine(OpenAICompatLocalRuntime(provider, langs), consent_scope=None)
