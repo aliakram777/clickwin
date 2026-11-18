@@ -32,6 +32,7 @@ from agents.memory import detect_secrets
 from agents.orchestrator import Task
 from agents.research import detect_injection
 from agents.spec import KNOWN_PERMISSIONS, AgentSpec
+from safety.dbconn import connect
 from safety.approvals import Principal
 
 SPEC_COST_CEILING = 5.0   # spec tavanı: real büdcə Company-də (defolt 0.0) və qlobal tavanla məhdudlaşır
@@ -302,7 +303,7 @@ class _Core:
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
-        self.conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=30, check_same_thread=False)
+        self.conn = connect(str(db_path), isolation_level=None, timeout=30)
         self.conn.row_factory = sqlite3.Row
         for stmt in _SCHEMA:
             self.conn.execute(stmt)
