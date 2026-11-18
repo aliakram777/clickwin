@@ -36,22 +36,22 @@ def clear_approval(led, *, scope_op="clear_cap_breaker", breaker_id=None, owner_
 
 def test_overrun_is_recorded_exactly_and_trips_a_durable_breaker(tmp_path):
     path = tmp_path / "l.db"
-    led = owned_ledger(path, global_limit=10.0)
+    led = owned_ledger(path, global_limit=0.5)
     assert led.reserve("a", "x", 0.3).ok
     st = led.settle("a", 0.75)                                                      # faktiki rezervdən çox
     assert isinstance(st, Settlement) and st.ok and st.overran and st.breaker_tripped
-    assert st.reserved == pytest.approx(0.3) and st.actual == 0.75 and st.overrun == pytest.approx(0.45) and not st.over_cap
+    assert st.reserved == pytest.approx(0.3) and st.actual == 0.75 and st.overrun == pytest.approx(0.45) and st.over_cap       # 0.75 > tavan 0.5
     assert led.entries()[0].amount == 0.75 and led.total() == 0.75                  # dəqiq: kəsilməyib, azaldılmayıb
     b = led.breaker()
     assert b["op_id"] == "a" and b["actual"] == 0.75 and b["reserved"] == pytest.approx(0.3) and b["total"] == 0.75
     led.close()
-    again = owned_ledger(path, global_limit=10.0)                                   # yenidən açılış: kəsici DAVAMLIDIR
+    again = owned_ledger(path, global_limit=0.5)                                   # yenidən açılış: kəsici DAVAMLIDIR
     assert again.breaker()["id"] == b["id"]
     assert again.reserve("b", "x", 0.0).status == "denied"
 
 
 def test_commit_keeps_its_boolean_contract_and_also_trips_the_breaker(tmp_path):
-    led = CostLedger(tmp_path / "l.db")
+    led = CostLedger(tmp_path / "l.db", global_limit=0.4)
     led.reserve("a", "x", 0.1)
     assert led.commit("a", 0.5) is True
     assert led.commit("a", 0.5) is False and led.commit("ghost", 1.0) is False
@@ -59,7 +59,7 @@ def test_commit_keeps_its_boolean_contract_and_also_trips_the_breaker(tmp_path):
 
 
 def test_after_the_breaker_every_new_reservation_is_denied_including_zero_cost(tmp_path):
-    led = CostLedger(tmp_path / "l.db")                                              # tavan YOXDUR: yalnız rezerv aşması
+    led = CostLedger(tmp_path / "l.db", global_limit=0.25)
     led.reserve("a", "x", 0.1)
     led.reserve("inflight", "x", 0.1)
     led.settle("a", 0.2)
@@ -95,10 +95,10 @@ def test_overrun_events_are_audited_with_exact_numbers(tmp_path):
 
 
 def test_concurrent_settlement_trips_exactly_once_and_loses_no_cost(tmp_path):
-    led = CostLedger(tmp_path / "l.db", global_limit=100.0)
+    led = CostLedger(tmp_path / "l.db", global_limit=1.0)
     n = 12
     for i in range(n):
-        assert led.reserve(f"op{i}", "x", 0.1).ok
+        assert led.reserve(f"op{i}", "x", 0.05).ok
     bar = threading.Barrier(n)
 
     def settle(i):
@@ -106,16 +106,16 @@ def test_concurrent_settlement_trips_exactly_once_and_loses_no_cost(tmp_path):
         return led.settle(f"op{i}", 0.25)
     with ThreadPoolExecutor(n) as ex:
         results = list(ex.map(settle, range(n)))
-    assert all(r.ok and r.overran for r in results) and sum(r.breaker_tripped for r in results) == 1      # kəsici ATOMİK: tam bir dəfə
+    assert all(r.ok and r.overrun > 0 for r in results) and sum(r.breaker_tripped for r in results) == 1      # kəsici ATOMİK: tam bir dəfə (tavan 1.0 aşılanda)
     assert led.total() == pytest.approx(0.25 * n)                                                          # heç bir xərc itirilməyib
     assert [e["event"] for e in led.events()].count("breaker_tripped") == 1 and [e["event"] for e in led.events()].count("overrun") == n
     assert led.reserve("late", "x", 0.0).status == "denied"
 
 
 def test_concurrent_reservations_are_atomic_against_the_cap_and_a_tripped_breaker(tmp_path):
-    led = CostLedger(tmp_path / "l.db", global_limit=1.0)
+    led = CostLedger(tmp_path / "l.db", global_limit=0.15)
     led.reserve("seed", "x", 0.1)
-    led.settle("seed", 0.2)                                                          # breaker açıq
+    led.settle("seed", 0.2)                                                          # tavan aşıldı: breaker açıq
     with ThreadPoolExecutor(16) as ex:
         res = list(ex.map(lambda i: led.reserve(f"c{i}", "x", 0.0), range(32)))
     assert all(r.status == "denied" for r in res) and len(led.entries()) == 1
@@ -124,7 +124,7 @@ def test_concurrent_reservations_are_atomic_against_the_cap_and_a_tripped_breake
 # ---- təmizləmə: yalnız dəqiq, bir-dəfəlik sahib təsdiqi ilə, auditli
 
 def test_only_an_exact_one_time_owner_approval_clears_the_breaker(tmp_path):
-    led = owned_ledger(tmp_path / "l.db", global_limit=10.0)
+    led = owned_ledger(tmp_path / "l.db", global_limit=0.15)
     led.reserve("a", "x", 0.1)
     led.settle("a", 0.2)
     bid = led.breaker()["id"]
@@ -142,8 +142,7 @@ def test_only_an_exact_one_time_owner_approval_clears_the_breaker(tmp_path):
     ok = clear_approval(led)
     assert led.clear_breaker(ok) is True and led.breaker() is None
     assert led.clear_breaker(ok) is False                                            # kəsici yoxdur: heç nə dəyişmir
-    led.reserve("b", "x", 0.1)
-    led.settle("b", 0.5)                                                             # yeni aşma: yeni kəsici, köhnə təsdiq yararsız
+    led.record("direct", "x", 0.5)                                                   # yeni tavan aşması: yeni kəsici, köhnə təsdiq yararsız
     with pytest.raises(ResolutionDenied) as e:
         led.clear_breaker(ok)
     assert e.value.code in ("scope_mismatch", "credential_replayed")
@@ -161,7 +160,7 @@ def test_clearing_is_audited_and_does_not_raise_the_cap(tmp_path):
 
 
 def test_without_a_verifier_the_breaker_cannot_be_cleared(tmp_path):
-    led = CostLedger(tmp_path / "l.db")
+    led = CostLedger(tmp_path / "l.db", global_limit=0.2)
     led.reserve("a", "x", 0.1)
     led.settle("a", 0.3)
     with pytest.raises(ResolutionDenied) as e:
@@ -170,7 +169,7 @@ def test_without_a_verifier_the_breaker_cannot_be_cleared(tmp_path):
 
 
 def test_the_execution_port_can_settle_and_read_but_not_clear(tmp_path):
-    port = LedgerPort(owned_ledger(tmp_path / "l.db"))
+    port = LedgerPort(owned_ledger(tmp_path / "l.db", global_limit=0.2))
     port.reserve("a", "x", 0.1)
     assert port.settle("a", 0.3).breaker_tripped and port.breaker() is not None and port.events()
     assert not hasattr(port, "clear_breaker") and not hasattr(port, "record")
@@ -227,7 +226,7 @@ def test_sequential_overrun_is_reported_exact_and_blocks_the_next_provider_call(
     assert prov.calls == 1                                                              # kəsicidən sonra provayderə HEÇ BİR çağırış getməyib
 
 
-def test_output_over_the_ceiling_is_charged_exactly_reported_and_trips_the_breaker(tmp_path):
+def test_output_over_the_ceiling_is_charged_exactly_reported_and_blocks_only_the_offending_provider(tmp_path):
     led = CostLedger(tmp_path / "l.db", global_limit=100.0)
     prov = Paid(pin=10, pout=5000)                                                    # çıxış tavanı (1024) aşılıb
     g = guarded(tmp_path, prov, led)
@@ -235,7 +234,8 @@ def test_output_over_the_ceiling_is_charged_exactly_reported_and_trips_the_break
         with pytest.raises(LLMBudgetOverrun) as e:
             g.complete("x")
         assert led.total() == pytest.approx(10 * 0.01 / 1000 + 5000 * 0.02 / 1000)
-        assert e.value.overrun > 0 and led.breaker() is not None
+        assert e.value.ceiling_exceeded is True and led.breaker() is None            # MALİYYƏ kəsicisi açılmır (tavan qorunur)
+        assert led.provider_breaker("paid") is not None                              # AYRI provayder kəsicisi açıldı
         with pytest.raises(LLMBudgetExceeded):
             g.complete("y")
     assert prov.calls == 1
@@ -269,7 +269,7 @@ def test_concurrent_inflight_overruns_are_all_reported_none_under_reported_and_l
 
 def test_agent_scoped_calls_use_the_same_conservative_reservation_and_breaker(tmp_path):
     from agents.llm import SpendScope as Scope
-    led = CostLedger(tmp_path / "l.db", global_limit=100.0)
+    led = CostLedger(tmp_path / "l.db", global_limit=0.03)                           # ledger tavanı agent çağırışının verdiyi 100.0 AZN limitindən üstündür
     prov = Paid(pin=3000, pout=10)
     g = guarded(tmp_path, prov, led)
     with broker_context(), spend_scope(Scope("agent_a", "agt:t1", 1.0, 100.0)):
@@ -287,7 +287,7 @@ def spec(limit=5.0):
 
 
 def test_broker_reports_an_overrun_and_refuses_everything_afterwards(tmp_path):
-    led = CostLedger(tmp_path / "l.db", global_limit=5.0)
+    led = CostLedger(tmp_path / "l.db", global_limit=1.0)
     broker = EffectBroker(tmp_path / "a.jsonl", tmp_path / "STOP", ledger=led, actual_cost=lambda out: out["cost"])
     ran = []
 
@@ -316,8 +316,8 @@ def prod(tmp_path, *, limit, responses):
     return svc, engines, transport
 
 
-def test_production_overrun_trips_the_breaker_and_no_later_chat_reaches_the_provider_until_the_owner_clears(tmp_path):
-    svc, engines, transport = prod(tmp_path, limit=1.0, responses=[ok_body(pin=3000, pout=1000)])      # faktiki 0.05 > rezerv ~0.031
+def test_production_overrun_over_the_cap_trips_the_breaker_and_no_later_chat_reaches_the_provider(tmp_path):
+    svc, engines, transport = prod(tmp_path, limit=0.04, responses=[ok_body(pin=3000, pout=1000)])      # faktiki 0.05 > tavan 0.04
     svc.app.chat.send("x" * 900)
     assert len(transport.calls) == 1
     assert svc.ledger.breaker() is not None and svc.ledger.total() == pytest.approx(3000 * 0.01 / 1000 + 1000 * 0.02 / 1000)
@@ -325,14 +325,12 @@ def test_production_overrun_trips_the_breaker_and_no_later_chat_reaches_the_prov
     for i in range(3):
         svc.app.chat.send("y" * (901 + i))                                                              # Broker sıfır xərcli rezervi də rədd edir
     assert len(transport.calls) == 1                                                                    # provayderə yeni çağırış YOXDUR
-    # sahib step-up ilə təmizləyir
     dev = pair(svc.auth)
     p = types.SimpleNamespace(stack=svc.factory, dev=dev)
     subject, digest = svc.reconciler.clear_scope()
-    approval = authenticate(p, "clear_cap_breaker", subject, digest)
+    approval = authenticate(p, "clear_cap_breaker", subject, digest)                                    # sahib step-up ilə təmizləyir
     assert svc.reconciler.clear_breaker(approval) is True and svc.reconciler.breaker() is None
     svc.app.chat.send("z" * 905)
-    assert len(transport.calls) == 2                                                                    # təmizləmədən sonra (tavan daxilində) yenə işləyir
-    with pytest.raises(ResolutionDenied):
-        svc.reconciler.clear_breaker(approval)                                                          # eyni təsdiq təkrar işləmir
+    assert len(transport.calls) == 1                                                                    # təmizləmə tavanı yüksəltmir: ümumi xərc hələ tavandan çoxdur
+    assert svc.reconciler.clear_breaker(approval) is False                                              # eyni təsdiq təkrar işləmir (kəsici yoxdur)
     svc.factory.agents.close()

@@ -110,6 +110,8 @@ Mərhələ 17 — Real AI runtime və avtonom agent fabrikası (məhdud agent ya
 
 - Mərhələ 17 / PR #25 — `build_app` real ödənişli mühərrik üçün açıq, EYNİ kitabı tələb edir (bölünmüş kitab yan keçidi bağlandı); faktiki xərc dəqiq yazılır, rezerv mühafizəkardır, aşma auditə yazılır və davamlı "tavan aşıldı" kəsicisi açır (hər yeni rezerv, sıfır xərclilər daxil, sahib step-up təsdiqi ilə təmizlənənə qədər rədd edilir); aşma çağırana `LLMBudgetOverrun`/`cost_status=overrun` ilə bildirilir. Testlər: `tests/test_build_app_engine_ledger.py`, `tests/test_overrun_breaker.py`. Uçuşdakı provayder haqqı geri qaytarıla bilməz (AGENT_FACTORY.md).
 
+- Mərhələ 17 / PR #26 — xərc rezervi UTF-8 baytla (Unicode/emoji/CJK üçün yuxarı hədd); tavan daxilində rezervi aşma (dürüst tokenizer fərqi) kəsici açmır, dəqiq yazılır və bildirilir, maliyyə kəsicisi yalnız tavan aşılanda; `build_app` fail-closed (yalnız tam tipi etibarlı mühərriklər, özü-bəyan `is_mock`-a güvənilmir, test bayrağı `allow_unaudited_engines` yalnız naməlum tiplər üçün və istehsalda ötürülmür); çıxış tavanı pozuntusu atomik `output_ceiling_violation` + AYRI provayder kəsicisi (sahib təsdiqi ilə təmizlənir), `LLMBudgetOverrun(ceiling_exceeded=True)`. Testlər: `tests/test_unicode_engine_ceiling.py`.
+
 ## Növbəti addımlar (təsdiq gözləyir)
 - LLM əsaslı Planner (interfeys hazırdır, real API təsdiq tələb edir)
 - Asılılıq çıxışlarının növbəti addıma ötürülməsi, retry gözləməsi (backoff)
