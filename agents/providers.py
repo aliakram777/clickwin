@@ -107,6 +107,42 @@ def validate_endpoint(url: Any, kind: str) -> str:
     return f"{scheme}://{auth}{path}"
 
 
+_PRIVATE_NETWORKS = tuple(ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"))
+
+
+def ip_allowed(ip: ipaddress._BaseAddress, kind: str) -> bool:
+    """Çözülmüş (həqiqi bağlantı) ünvan siyasəti. IPv4-ə xəritələnmiş IPv6 (`::ffff:a.b.c.d`) əvvəlcə açılır.
+    - `private` (lokal): YALNIZ loopback (127/8, ::1) və RFC1918/ULA (10/8, 172.16/12, 192.168/16, fc00::/7). İctimai, link-local (169.254/16, fe80::/10), multicast, unspecified (0.0.0.0, ::),
+      CGNAT (100.64/10), sənədləşmə/rezerv aralıqları və qalan HƏR ŞEY rədd edilir.
+    - `cloud`: YALNIZ qlobal marşrutlanan ictimai unicast ünvan (`is_global`); loopback/özəl/link-local/multicast/unspecified/CGNAT rədd edilir."""
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    if kind == "private":
+        return ip.is_loopback or any(ip.version == n.version and ip in n for n in _PRIVATE_NETWORKS)
+    if kind == "cloud":
+        return ip.is_global and not ip.is_multicast
+    raise ValueError("kind cloud|private olmalıdır")
+
+
+def check_resolved_addresses(host: str, addresses: Sequence[str], kind: str) -> list[str]:
+    """Hostname-in BÜTÜN A/AAAA nəticələri yoxlanılır: boşdursa, oxunmursa və ya İSTƏNİLƏN biri siyasətə uyğun deyilsə (həm özəl, həm ictimai qaytaran ad daxil) `EndpointError` (FAIL-CLOSED).
+    Yoxlanmış ünvanlar qaytarılır: nəqliyyat YALNIZ bunlardan birinə (ikinci DNS sorğusu olmadan) qoşulur (DNS rebinding/TOCTOU yoxdur)."""
+    out: list[str] = []
+    for raw in addresses:
+        try:
+            ip = ipaddress.ip_address(str(raw).split("%", 1)[0])
+        except ValueError:
+            raise EndpointError("host ünvanı oxunmadı (fail-closed)") from None
+        if not ip_allowed(ip, kind):
+            raise EndpointError(f"host '{host[:60]}' siyasətə uyğun olmayan ünvana çözülür ({kind} endpoint üçün icazəsiz IP)")
+        if str(ip) not in out:
+            out.append(str(ip))
+    if not out:
+        raise EndpointError(f"host '{host[:60]}' heç bir ünvana çözülmədi")
+    return out
+
+
 class ProviderTimeout(LLMProviderError):
     pass
 
