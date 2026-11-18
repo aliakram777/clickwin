@@ -15,9 +15,11 @@ from agents.llm import (GuardedLLM, LLMBudgetExceeded, LLMConfig, LLMProviderErr
 from agents.orchestrator import ExecutionError, Task
 from agents.registry import Registry
 from safety.approvals import Principal
-from tests.factory_keys import DISPATCHER, MOCK, OWNER, STRANGER, SYSTEM, T0, auth_for
+from safety.execution_context import broker_context
+from tests.factory_keys import owner_cred, DISPATCHER, MOCK, OWNER, STRANGER, SYSTEM, T0, auth_for, OWNER_APPROVER
 from tests.test_agent_runtime import publisher, rows, task, world  # noqa: F401  (fixture)
 from tests.test_hybrid_router import Fake
+from tests.owner_proxy import ScopedCompany, ScopedAgentFactory
 
 FORGED_OWNER = Principal("owner", "human", "console")        # sahibin id-si gizli deyil: hər kəs bunu yarada bilər
 FORGED_SYSTEM = Principal("naymera", "system", "core")
@@ -55,18 +57,19 @@ def test_forged_owner_and_system_principals_are_rejected_everywhere(world):
 
 def test_tampered_or_copied_signatures_do_not_authenticate(world):
     w = world
-    stolen = OWNER.signature
-    for forged in (dataclasses.replace(OWNER, id="mallory"), dataclasses.replace(OWNER, channel="other"),
-                   dataclasses.replace(OWNER, expires_at=OWNER.expires_at + 1), dataclasses.replace(OWNER, role="system"),
-                   dataclasses.replace(OWNER, signature=stolen[:-2] + ("AA" if not stolen.endswith("AA") else "BB")),
-                   dataclasses.replace(OWNER, signature=""), dataclasses.replace(OWNER, signature="x" * 86),
+    base = owner_cred("create_agent", "programmer")
+    stolen = base.signature
+    for forged in (dataclasses.replace(base, id="mallory"), dataclasses.replace(base, channel="other"),
+                   dataclasses.replace(base, expires_at=base.expires_at + 1), dataclasses.replace(base, role="system"),
+                   dataclasses.replace(base, signature=stolen[:-2] + ("AA" if not stolen.endswith("AA") else "BB")),
+                   dataclasses.replace(base, signature=""), dataclasses.replace(base, signature="x" * 86),
                    dataclasses.replace(SYSTEM, kind="human", id="owner")):
         with pytest.raises(FactoryDenied) as e:
             w.factory.admin.create_agent("programmer", forged)
         assert e.value.code in ("forged_principal", "role_not_allowed", "unauthorized"), forged
     other = TrustedSigner("test-key-1", __import__("secrets").token_bytes(32), clock=lambda: T0)   # başqa açar, eyni id
     with pytest.raises(FactoryDenied) as e:
-        w.factory.admin.create_agent("programmer", other.owner_issuer(lambda r: ("owner", "dev"), ttl=600).from_step_up(object()))
+        w.factory.admin.create_agent("programmer", other.owner_issuer(lambda r: ("owner", "dev", "factory:" + r[0], r[1], r[2]), ttl=600).from_step_up(("create_agent", "programmer", "0" * 64)))
     assert e.value.code == "forged_principal"
 
 
@@ -80,7 +83,7 @@ def test_roles_cannot_be_swapped(world):
     assert e.value.code == "owner_only"
     a = w.factory.control.spawn("programmer", SYSTEM)
     t = w.factory.control.assign(a.agent_id, "t", "p", SYSTEM)
-    for who in (OWNER, SYSTEM):                                  # sahib/sistem tapşırığı tuta bilməz
+    for who in (owner_cred("claim", t.task_id), SYSTEM):          # sahib/sistem tapşırığı tuta bilməz
         with pytest.raises(FactoryDenied) as e:
             w.factory.runtime.claim(t.task_id, who)
         assert e.value.code == "role_not_allowed"
@@ -96,8 +99,8 @@ def test_roles_cannot_be_swapped(world):
 def test_without_trusted_authentication_privileged_operations_fail_closed(tmp_path):
     reg = Registry(":memory:")
     audit = tmp_path / "a.jsonl"
-    company = Company(reg, tmp_path / "c.db", audit, owners={"owner"})
-    f = AgentFactory(company, tmp_path / "f.db", audit, tmp_path / "ws", owners={"owner"})          # verifier=None
+    company = ScopedCompany(reg, tmp_path / "c.db", audit, owners={"owner"})
+    f = ScopedAgentFactory(company, tmp_path / "f.db", audit, tmp_path / "ws", owners={"owner"})          # verifier=None
     for p in (OWNER, SYSTEM, FORGED_OWNER, FORGED_SYSTEM):
         for fn in (lambda: f.control.spawn("programmer", p), lambda: f.admin.create_agent("programmer", p),
                    lambda: f.admin.set_policy(p, max_agents=3)):
@@ -198,7 +201,7 @@ def test_the_approved_text_is_exactly_the_executed_text(world):
     ticket = w.approvals.reader.get(r.approval_id)
     assert ticket.payload == approval_input(a, w.factory.view.task(t.task_id))          # sahibin gördüyü giriş
     assert ticket.payload["sorgu"] == prompt
-    assert w.approvals.gateway.approve(r.approval_id, OWNER, "ok").ok
+    assert w.approvals.gateway.approve(r.approval_id, OWNER_APPROVER, "ok").ok
     assert w.disp.execute(t.task_id).status == "done"
     assert w.cloud.calls == 1 and w.cloud.prompts[0] == prompt and w.cloud.systems[0] == a.system_instruction     # modelə gedən = təsdiqlənən
 
@@ -206,7 +209,7 @@ def test_the_approved_text_is_exactly_the_executed_text(world):
 def test_prompt_altered_after_approval_request_is_not_executed(world):
     w = world
     a, t, r = approved_publish(w)
-    assert w.approvals.gateway.approve(r.approval_id, OWNER, "ok").ok
+    assert w.approvals.gateway.approve(r.approval_id, OWNER_APPROVER, "ok").ok
     w.factory._core.conn.execute("UPDATE factory_tasks SET prompt = ? WHERE task_id = ?", ("başqa, təsdiqlənməmiş mətn", t.task_id))
     r2 = w.disp.execute(t.task_id)
     assert r2.status == "failed" and "prompt_integrity" in r2.reason and w.cloud.calls == 0
@@ -216,7 +219,7 @@ def test_prompt_altered_after_approval_request_is_not_executed(world):
 def test_prompt_and_hash_both_rewritten_still_fails_the_approval_digest_check(world):
     w = world
     a, t, r = approved_publish(w)
-    assert w.approvals.gateway.approve(r.approval_id, OWNER, "ok").ok
+    assert w.approvals.gateway.approve(r.approval_id, OWNER_APPROVER, "ok").ok
     import hashlib
     evil = "təsdiqlənməmiş mətn"
     w.factory._core.conn.execute("UPDATE factory_tasks SET prompt = ?, prompt_sha = ? WHERE task_id = ?",
@@ -259,7 +262,7 @@ def test_runner_uses_the_approved_input_not_a_fresh_database_read(world):
 def test_approval_cannot_be_replayed_or_moved_to_another_task(world):
     w = world
     a, t, r = approved_publish(w, "birinci mətn")
-    assert w.approvals.gateway.approve(r.approval_id, OWNER, "ok").ok
+    assert w.approvals.gateway.approve(r.approval_id, OWNER_APPROVER, "ok").ok
     assert w.disp.execute(t.task_id).status == "done" and w.cloud.calls == 1
     assert w.disp.execute(t.task_id).status == "not_claimable"                           # eyni tapşırıq təkrar icra olunmur
     # təkrar: eyni təsdiq/op_id ilə birbaşa Orkestrator (istehlak olunmuş təsdiq)
@@ -282,7 +285,7 @@ def test_sensitive_tasks_get_no_memory_context_so_the_approved_text_is_the_whole
         category, text, id, project, ts = "project", "gizli kontekst", "m1", "p", 1.0
     w.runner.memory = lambda: [Rec()]
     a, t, r = approved_publish(w, "yalnız bu mətn")
-    assert w.approvals.gateway.approve(r.approval_id, OWNER, "ok").ok
+    assert w.approvals.gateway.approve(r.approval_id, OWNER_APPROVER, "ok").ok
     assert w.disp.execute(t.task_id).status == "done"
     assert w.cloud.prompts == ["yalnız bu mətn"]
 
@@ -339,7 +342,7 @@ def test_zero_budget_agent_never_triggers_paid_cloud(paid):
 def test_gateless_cloud_clients_are_still_stopped_by_the_ledger_for_zero_budget(paid):
     """Router-in `allow_paid` qoruması olmasa belə GuardedLLM sıfır büdcəni AÇIQ çağırışdan əvvəl rədd edir."""
     w = paid
-    with spend_scope(SpendScope("programmer_x", "agt:tsk_1", 0.0)):
+    with broker_context(), spend_scope(SpendScope("programmer_x", "agt:tsk_1", 0.0)):       # Broker daxilində (A-8: kənarda ümumiyyətlə bloklanır)
         with pytest.raises(LLMBudgetExceeded):
             w.llm.complete("sual")
     assert w.provider.calls == 0 and llm_entries(w) == []
@@ -473,11 +476,12 @@ def test_known_uncharged_failure_releases_the_reservation(paid):
 def test_agent_scope_without_a_ledger_fails_closed_for_real_providers(tmp_path):
     provider = PaidProvider()
     llm = GuardedLLM(provider, LLMConfig(provider="openai_compat", model="m", price_in_per_1k=0.1, price_out_per_1k=0.1), log_path=tmp_path / "l.jsonl")
-    with spend_scope(SpendScope("a", "agt:t1", 1.0)):
-        with pytest.raises(LLMBudgetExceeded):
-            llm.complete("sual")
-    assert provider.calls == 0
-    assert llm.complete("sual").text                                                       # əhatə yoxdursa köhnə davranış dəyişməyib
+    with broker_context():
+        with spend_scope(SpendScope("a", "agt:t1", 1.0)):
+            with pytest.raises(LLMBudgetExceeded):
+                llm.complete("sual")
+        assert provider.calls == 0
+        assert llm.complete("sual").text                                                   # əhatə yoxdursa köhnə davranış dəyişməyib (Broker daxilində)
 
 
 @pytest.mark.parametrize("kw", [dict(agent="", op_id="x", agent_limit=1.0), dict(agent="a", op_id="bad op!", agent_limit=1.0),

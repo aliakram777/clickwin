@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Protocol
 
+from safety.execution_context import in_broker
 from safety.ledger import CostLedger
 
 DEFAULT_LLM_LOG = Path("logs/llm.jsonl")
@@ -419,6 +420,9 @@ class GuardedLLM:
             raise fail("blocked", LLMBlocked("stop bayrağı aktivdir"))
         if not isinstance(prompt, str) or not isinstance(system, str):
             raise fail("rejected", LLMBadRequest("prompt və system mətn olmalıdır"))
+        if not bool(getattr(self.provider, "is_mock", False)) and not in_broker():
+            # A-8: ödənişli (real) provayder YALNIZ Effect Broker (stop/Gate/audit/Ledger) daxilində çağırılır; kənarda heç bir rezerv və ya provayder çağırışı olmur
+            raise fail("blocked", LLMBlocked("ödənişli LLM çağırışı yalnız Effect Broker (Gate/Ledger) daxilində icazəlidir"))
         info["prompt_sha256"] = hashlib.sha256((system + "\x00" + prompt).encode("utf-8")).hexdigest()
         info["prompt_chars"] = len(system) + len(prompt)
         if len(system) + len(prompt) > cfg.max_prompt_chars:
@@ -443,14 +447,19 @@ class GuardedLLM:
             raise fail("budget_exceeded", LLMBudgetExceeded("agent xərc büdcəsi üçün xərc kitabı (ledger) tələb olunur"))
         if self.ledger is not None:  # xərc büdcəsi (davamlı)
             est_cost = est_in * cfg.price_in_per_1k / 1000 + cap * cfg.price_out_per_1k / 1000
-            if scope is not None:  # agentə aid sorğu: Ledger-də AGENTİN adına, sabit op_id ilə (təkrar icra ikinci dəfə ödənilmir)
-                op_id = "llm:" + scope.op_id
-                res = self.ledger.reserve(op_id, scope.agent, est_cost, agent_limit=scope.agent_limit, global_limit=scope.global_limit,
-                                          group_prefix="llm:", group_limit=cfg.cost_limit, description=f"llm:{name}")
-            else:
-                op_id = "llm:" + uuid.uuid4().hex
-                res = self.ledger.reserve(op_id, "llm", est_cost, agent_limit=cfg.cost_limit,
-                                          description=f"llm:{name}")
+            try:
+                if scope is not None:  # agentə aid sorğu: Ledger-də AGENTİN adına, sabit op_id ilə (təkrar icra ikinci dəfə ödənilmir)
+                    op_id = "llm:" + scope.op_id
+                    res = self.ledger.reserve(op_id, scope.agent, est_cost, agent_limit=scope.agent_limit, global_limit=scope.global_limit,
+                                              group_prefix="llm:", group_limit=cfg.cost_limit, description=f"llm:{name}")
+                else:
+                    op_id = "llm:" + uuid.uuid4().hex
+                    res = self.ledger.reserve(op_id, "llm", est_cost, agent_limit=cfg.cost_limit,
+                                              description=f"llm:{name}")
+            except Exception:  # noqa: BLE001 — xərc kitabı əlçatmazdır: heç bir provayder çağırışı yoxdur (qapalı qalır); rezerv tranzaksiya ilə geri alınıb
+                op_id = ""
+                self._release_tokens(reserve)
+                raise fail("budget_exceeded", LLMBudgetExceeded("xərc kitabı əlçatmazdır: sorğu bloklandı")) from None
             if res.status != "reserved":
                 op_id = ""   # rezerv götürülməyib: sonrakı mərhələlər başqasının qeydinə toxunmur
                 self._release_tokens(reserve)
@@ -466,7 +475,16 @@ class GuardedLLM:
                 box["exc"] = exc
 
         worker = threading.Thread(target=target, daemon=True)
-        worker.start()
+        try:
+            worker.start()
+        except BaseException:   # provayder çağırılmadı (məs. thread açıla bilmədi): rezerv və token SIZMIR
+            self._release_tokens(reserve)
+            if op_id and self.ledger is not None:
+                try:
+                    self.ledger.release(op_id)
+                except Exception:  # noqa: BLE001
+                    self._ledger_unknown(op_id)
+            raise
         worker.join(cfg.timeout_s)
 
         if worker.is_alive():  # abandon: sorğu haqqı tutula bilər -> xərc naməlum

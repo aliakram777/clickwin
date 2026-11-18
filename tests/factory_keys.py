@@ -2,12 +2,14 @@
 import secrets
 from types import SimpleNamespace
 
+from safety.approvals import Principal
+
 from agents.factory_auth import Keyring, TrustedSigner, validate_signing_seed
 
 T0 = 1_000_000.0          # testlərdəki `Clock` başlanğıcı
 
 
-def _seed() -> bytes:
+def random_seed() -> bytes:
     while True:
         raw = secrets.token_bytes(32)
         try:
@@ -17,7 +19,7 @@ def _seed() -> bytes:
             continue
 
 
-SEED = _seed()
+SEED = random_seed()
 KEY_ID = "test-key-1"
 SIGNER = TrustedSigner(KEY_ID, SEED, clock=lambda: T0)           # sabit T0 vaxtında imzalayır: modul-səviyyəli sabit şəxsiyyətlər üçün
 
@@ -43,15 +45,39 @@ def trust(clock) -> SimpleNamespace:
                            owner=signer.owner_issuer(lambda r: ("owner", "dev1")))
 
 
-def _owner(owner_id: str):
-    return SIGNER.owner_issuer(lambda r: (owner_id, "dev-" + owner_id), ttl=900).from_step_up(object())
+HASH0 = "0" * 64
 
 
-OWNER = _owner("owner")
-STRANGER = _owner("mallory")
+def owner_cred(op: str, subject: str = "", digest: str = HASH0, owner_id: str = "owner", *, signer=None, ttl: float = 900):
+    """DƏQİQ əhatəli (əməliyyat, hədəf, parametr-hash), YENİ nonce-lu bir-dəfəlik sahib etibarnaməsi (test etibar çıpası ilə). Real yolda bunu yalnız step-up qəbzi verir."""
+    issuer = (signer or SIGNER).owner_issuer(lambda r: (owner_id, "dev-" + owner_id, "factory:" + r[0], r[1], r[2]), ttl=ttl)
+    return issuer.from_step_up((op, subject, digest))
+
+
+class OwnerSentinel:
+    """Testlərdə `OWNER` yerinə keçən işarə: `ScopedAgentFactory/ScopedCompany` bunu hər əməliyyat üçün DƏQİQ əhatəli yeni etibarnamə ilə əvəz edir (sahibin hər əməliyyata ayrıca step-up
+    etdiyini modelləşdirir). Özü SignedPrincipal DEYİL: birbaşa istehsal obyektlərinə verilsə rədd edilir."""
+
+    def __init__(self, owner_id: str) -> None:
+        self.owner_id = owner_id
+
+    def mint(self, op: str, subject: str, digest: str):
+        return owner_cred(op, subject, digest, self.owner_id)
+
+
+class MockSentinel(OwnerSentinel):
+    """`kind="mock"` sahib işarəsi (real sahib təsdiqi DEYİL; fabrik/Company yalnız `allow_mock=True` ilə qəbul edir)."""
+
+    def mint(self, op: str, subject: str, digest: str):
+        return SIGNER.mock_owner_issuer(ttl=900).principal(self.owner_id, "test", (op, subject, digest))
+
+
+OWNER_APPROVER = Principal("owner", "human", "console")        # ApprovalService/Gateway üçün (ayrı sistem; fabrik etibarnaməsi deyil)
+OWNER = OwnerSentinel("owner")
+STRANGER = OwnerSentinel("mallory")
 SYSTEM = SIGNER.system_issuer(ttl=900).principal()
 DISPATCHER = SIGNER.dispatcher_issuer(ttl=900).principal()
-MOCK = SIGNER.mock_owner_issuer(ttl=900).principal("owner", "test")
+MOCK = MockSentinel("owner")
 _DISPATCH = SIGNER.dispatcher_issuer(ttl=900, auth_ttl=300)
 
 

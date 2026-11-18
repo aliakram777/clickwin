@@ -25,6 +25,7 @@ from typing import Any, Callable
 from agents.mobile import clean_text
 from api import p256
 from api.http import ApiError
+from safety.dbconn import connect
 
 _CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 _TOKEN = re.compile(r"^nay_([ar])_[A-Za-z0-9_\-]{43}$")
@@ -86,12 +87,13 @@ class AuthService:
                  pairing_ttl: int = 600, challenge_ttl: int = 60, receipt_ttl: int = 120) -> None:
         self.clock, self.owner_id = clock, owner_id
         self.receipt_ttl = receipt_ttl
+        self._revocation_listeners: list[Callable[[str], None]] = []
         self.access_ttl, self.refresh_ttl = access_ttl, refresh_ttl
         self.pairing_ttl, self.challenge_ttl = pairing_ttl, challenge_ttl
         self.audit_path = Path(audit_path)
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=30)
+        self._conn = connect(str(db_path), isolation_level=None, timeout=30)
         self._conn.row_factory = sqlite3.Row
         for stmt in (
             "CREATE TABLE IF NOT EXISTS pairing_codes (code_hash TEXT PRIMARY KEY, expires REAL NOT NULL, "
@@ -244,10 +246,24 @@ class AuthService:
         self._audit("auth_refresh", device_id=row["device_id"])
         return self._issue(row["device_id"])
 
+    def add_revocation_listener(self, fn: Callable[[str], None]) -> None:
+        """Cihaz ləğv olunduqda SİNXRON çağırılır (B-4): bu cihazın step-up ilə verilmiş bütün sahib etibarnamələrini dərhal ləğv etmək üçün."""
+        self._revocation_listeners.append(fn)
+
     def revoke_device(self, device_id: str) -> None:
         self._conn.execute("UPDATE devices SET status = 'revoked' WHERE device_id = ?", (device_id,))
         self._conn.execute("UPDATE tokens SET expires = 0 WHERE device_id = ?", (device_id,))
+        self._conn.execute("UPDATE stepup_receipts SET used = 1 WHERE device_id = ?", (device_id,))     # ödənilməmiş qəbzlər də yararsızdır
         self._audit("auth_device_revoked", device_id=device_id)
+        failed = False
+        for fn in list(self._revocation_listeners):
+            try:
+                fn(device_id)
+            except Exception:  # noqa: BLE001
+                failed = True
+                self._audit("auth_revocation_listener_failed", device_id=device_id)
+        if failed:                      # ləğv bazada tətbiq olunub, lakin verilmiş etibarnamələrin ləğvi tamamlanmadı: çağıran bilməlidir
+            raise RuntimeError("cihaz ləğv edildi, lakin etibarnamə ləğvi dinləyicisi uğursuz oldu")
 
     def logout(self, device_id: str) -> None:
         self.revoke_device(device_id)
@@ -317,9 +333,10 @@ class AuthService:
                            (rid, device_id, action, subject, payload_hash, self.clock() + self.receipt_ttl))
         return StepUpReceipt(rid, device_id, action, subject, payload_hash)
 
-    def consume_receipt(self, receipt: Any, action_prefix: str) -> tuple[str, str] | None:
+    def consume_receipt(self, receipt: Any, action_prefix: str) -> tuple[str, str, str, str, str] | None:
         """Qəbzi YALNIZ BİR DƏFƏ və yalnız gözlənilən əməliyyat növü (`action_prefix`) üçün qəbul edir. Qəbz bazadakı qeydlə eyni olmalı, vaxtı keçməməli,
-        cihaz hələ aktiv olmalıdır. Uğurda `(owner_id, device_id)`; əks halda None (heç bir izahat vermir)."""
+        cihaz hələ aktiv olmalıdır. Uğurda `(owner_id, device_id, action, subject, payload_hash)` (sahib etibarnaməsi bu əməliyyata/hədəfə/hash-a bağlanır, B-3);
+        əks halda None (heç bir izahat vermir)."""
         if not isinstance(receipt, StepUpReceipt) or not isinstance(action_prefix, str) or not action_prefix:
             return None
         row = self._conn.execute("SELECT * FROM stepup_receipts WHERE id = ?", (receipt.id,)).fetchone() if isinstance(receipt.id, str) else None
@@ -333,4 +350,4 @@ class AuthService:
             self._audit("auth_receipt_rejected", device_id=row["device_id"], reason="used_expired_or_inactive")
             return None
         self._audit("auth_receipt_consumed", device_id=row["device_id"], action=row["action"])
-        return self.owner_id, row["device_id"]
+        return self.owner_id, row["device_id"], row["action"], row["subject"], row["payload_hash"]

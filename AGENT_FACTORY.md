@@ -45,8 +45,9 @@ OpenAI-uyğun provayder adapteri (nəqliyyat inyeksiya olunur; `agents/` şəbə
 
 **Açar yaratma və konfiqurasiya (yalnız server mühiti).**
 ```bash
-python -c "from agents.factory_auth import generate_signing_seed as g; print(g())"   # 32 təsadüfi bayt (secrets), URL-təhlükəsiz base64, 43 simvol
-export NAYMERA_SIGNING_KEY=<çıxış>          # şəxsi açar: yalnız server mühiti/sirr meneceri; repoya, APK-ya, loqa YAZMAYIN
+python tools/gen_signing_key.py --key-id k-2026-11 --out /etc/naymera/signing.key   # 0600, mövcud faylın üzərinə YAZMIR (O_EXCL); şəxsi açar çıxışa YAZILMIR, yalnız açıq açar çap olunur
+export NAYMERA_SIGNING_KEY_FILE=/etc/naymera/signing.key   # TÖVSİYƏ OLUNAN: yalnız sahibə (0600/0400), cari istifadəçiyə məxsus adi fayl (symlink/geniş icazə rədd edilir)
+# ya da (daha zəif: prosesin mühiti başqa proseslərə görünə bilər): export NAYMERA_SIGNING_KEY=<32 bayt, base64url, 43 simvol>; ikisi BİRLİKDƏ verilə bilməz
 export NAYMERA_SIGNING_KEY_ID=k-2026-11      # aktiv açar id-si (3-40 simvol)
 export NAYMERA_VERIFY_KEYS=k-2026-10=<köhnə açıq açar base64>   # rotasiya: yalnız açıq hissə
 export NAYMERA_REVOKED_KEYS=k-2026-09        # kompromis: ləğv olunmuş açar id-ləri
@@ -85,6 +86,21 @@ Açar tam 32 bayt olmalıdır; təkrar/ardıcıl/az fərqli baytlı və ya oxuna
 
 **Paylama səthi (B-2).** `FactoryStack`: `view`, `owner_gate`, `console` (`OwnerConsole`: obyektdə yalnız təsadüfi `_token` simvol açarı var; funksiya default/closure/atributlarında `FactoryAdmin/Control`, `AgentFactory`, `Company` və bağlı metod YOXDUR, çağıran öz callable-ını ötürə bilmir; arxa uc modul reyestrindədir və eyni prosesdə `__globals__` ilə əlçatandır: bu proses-daxili sərhəd DEYİL), `dispatcher`, `team`, `agents` (`AgentGateway`). `agent_handle` və `admin` sahələri silinib. `dispatcher`/`team` etibarlı icra mühərrikləridir və fabrikə istinad saxlayır: onlar da agent koduna verilməməlidir.
 
+## Qalan audit tapıntıları (B-3, B-4, B-5, B-6, A-7, A-8; PR #22)
+**B-3 dəqiq əhatəli sahib etibarnaməsi.** `SignedPrincipal` indi `scope_op`, `scope_subject`, `scope_hash` daşıyır (imzalanan v3 baytlarına daxildir). Step-up `OwnerGate.challenge(device, op, subject, sha256(parametrlər))` ilə YALNIZ bir dəqiq əməliyyat üçün verilir; sahibin görəcəyi əhatə `console.scope("set_budget", agent_id, 2.0)` (`owner_scope`) ilə eyni funksiyadan hesablanır. Fabrik icradan əvvəl `(əməliyyat, hədəf, parametr-hash)`-i etibarnamənin əhatəsi ilə müqayisə edir (`scope_mismatch`) və etibarnamənin `nonce`-unu bazada istehlak edir: ikinci istifadə `credential_replayed`. Başqa əməliyyat, başqa agent/rol, genişləndirilmiş parametr (məs. əlavə icazə, böyük büdcə), `*`/boş əhatə rədd edilir. `Company` etibarnaməni müstəqil yoxlayır (imza, rol, ömür, ləğv, əməliyyat SİNFİ `COMPANY_OP_SCOPES`, bir-dəfəlik nonce `company_used_credentials`), lakin dəqiq hədəf/parametr-hash-i YOXLAMIR: bunu yalnız fabrik edir. Sistem/dispetçer etibarnamələri dəyişməyib.
+
+**B-4 ləğv dərhal.** `AuthService.revoke_device` cihazın tokenlərini, istifadə olunmamış qəbzlərini yandırır və qeydiyyatlı dinləyiciləri SİNXRON çağırır; `TrustAnchor` dinləyicisi `Keyring` kanalını (`stepup:<cihaz>`) ləğv edir, ona görə həmin cihazdan verilmiş, vaxtı keçməmiş etibarnamə fabrikdə də, `Company`-də də `credential_revoked` ilə rədd olunur. Bootstrap əvvəldən ləğv olunmuş cihazları da yenidən tətbiq edir. Dinləyici uğursuz olarsa `revoke_device` səssiz keçmir: `RuntimeError` verir (cihaz bazada ləğv olunub, çağıran tam ləğvin tamamlanmadığını bilir).
+
+**B-5 iplik təhlükəsizliyi və bağlantı ömrü.** `safety/dbconn.LockedConnection`: tək SQLite bağlantısı `RLock` ilə ardıcıllaşdırılır (`check_same_thread=False` yalnız bu kilid ilə), `transaction()` (xəta olduqda geri qaytarma), idempotent `close()`, bağlandıqdan sonra əməliyyatlar açıq xəta verir. Registry, Ledger, Company, AuthService, Approvals, Memory, Mobile/Notify, Durable, Jobs, Chat bunu istifadə edir; paylaşılan Ledger-də paralel rezervlər qlobal limiti aşmır.
+
+**B-6 açar yoxlaması.** `validate_signing_seed` bariz zəif material kəsir: ≥20 fərqli bayt, bayt təkrarı ≤4, qısa dövr, sabit-fərqli (arifmetik) ardıcıllıq, hamısı 7-bit/çap olunan, monobit 88..168, ən uzun eyni-bit seriyası ≤28, tanınmış zəif ifadələrin hash-i; `decode_signing_seed` kanonik olmayan base64-ü (eyni baytlar, fərqli mətn) rədd edir. `tools/gen_signing_key.py` yuxarıdakı kimi yaradır. DÜRÜST QEYD: bu təsadüfiliyin SÜBUTU DEYİL, yalnız bariz zəifləri kəsən heuristikadır (təsadüfi açarın səhvən rədd olunma ehtimalı kiçikdir, generator yenidən yaradır).
+
+**A-7 Ledger rezervləri.** `commit/release/mark_unknown` YALNIZ mövcud `reserved` sətri üçün işləyir (naməlum `op_id` üçün `False`, sətir yaranmır; bir rezerv yarışda yalnız bir dəfə həll olunur). `stale_reserved/expire_stale`: köhnə rezervləri AZAD ETMİR, `unknown` işarələyir (məbləğ sayılmaqda qalır). `resolve_unknown(op_id, actual|None, resolved_by)` sahibin uzlaşdırmasıdır. `GuardedLLM` rezerv və `worker.start()` xətalarında tokeni/rezervi sızdırmır; provayder çağırışı başladıqdan sonra xəta olarsa məbləğ `unknown` qalır (provayder xərc çəkmiş ola bilər).
+
+**A-8 ödənişli LLM yalnız Broker-dən.** `safety/execution_context.py`: Broker `EffectBroker.run` icrası zamanı kontekst bayrağı qoyur; `GuardedLLM` mock olmayan provayderi bu kontekstdən KƏNARDA çağırmır (`LLMBlocked`, nə rezerv, nə provayder çağırışı). `runtime/brokered_llm.BrokeredRouter` söhbət və LLM planlaşdırmanı `EffectBroker.run` (stop → Gate/audit → Ledger → icra) ilə bükür (`api/bootstrap.py`). `AgentLLMRunner.generate(prefetch=True)` ödənişli mühərriki heç vaxt istəmir (`allow_paid=False`).
+
+**Bu işdən sonra qalan risklər.** (1) A-8 qadağası eyni prosesdəki kontekst dəyişəninə əsaslanır: prosesdə ixtiyari kod icra edən tərəf onu özü qoya bilər (bu OS sandbox DEYİL; agent kodu ayrı prosesdədir). (2) `Company` dəqiq hədəf/hash-i yoxlamır (yalnız fabrik). (3) `LockedConnection` bir bağlantıda əməliyyatları ardıcıllaşdırır (ötürmə qabiliyyəti məhdud; fərqli SQLite bazaları arasında atomik əməliyyat yoxdur). (4) Ləğv siyahıları və istifadə olunmuş-nonce yoxlaması proses daxilində/yerli bazadadır; çoxprosesli yerləşdirmədə ləğv yayımı və paylaşılan keyring ayrıca həll tələb edir. (5) `expire_stale` avtomatik çağırılmır, `resolve_unknown` sahib qərarıdır, lakin hələ API/step-up ilə qapılmayıb (etibarlı kod çağırır). (6) Açar keyfiyyəti heuristikadır. (7) Real Cloud/provayder, real cihaz və Android ilə sınaq aparılmayıb; APK build edilməyib.
+
 ## Məhdudiyyətlər
 - Real provayder/model ilə sınaq **aparılmayıb** (açar yoxdur, ödəniş yoxdur); adapter fake nəqliyyat və loopback test serveri ilə sınanıb. Real OpenAI-uyğun serverlə uyğunluq (müxtəlif cavab formatları) cihazda/serverdə yoxlanmalıdır.
 - Agentlər yalnız MƏTN istehsal edir; fayl yazma, test icrası, sayt/APK/video istehsalı və nəşr alətləri qoşulmayıb. Plan nəticələri qaralamadır.
@@ -97,4 +113,4 @@ Açar tam 32 bayt olmalıdır; təkrar/ardıcıl/az fərqli baytlı və ya oxuna
 
 - **PR #20-dən sonra AÇIQ qalan audit tapıntıları:** B-3 (sahib etibarnaməsi əməliyyata bağlı deyil), B-4 (cihaz ləğvi verilmiş etibarnaməni ləğv etmir), B-5 (thread-bound bağlantılar), B-6 (açar keyfiyyət heuristikası), B-8/B-9 (test/sənəd düzəlişləri qismən), A-7, A-8. Bu PR yalnız B-1 və B-2-ni ünvanlayır.
 
-- **PR #21 (H-1..H-4, M-1..M-4) sonrası:** bu işdə B-3, B-4, B-5, B-6, A-7, A-8 DƏYİŞDİRİLMƏYİB və açıqdır. Root olmayan CI-da unikal uid/şəbəkə namespace-i/çarpaz-siqnal/fork-setsid testləri ATLANIR (yalnız root mühitdə işləyir); bu xassələr CI-da yoxlanmır.
+- **PR #21 (H-1..H-4, M-1..M-4) sonrası:** B-3, B-4, B-5, B-6, A-7, A-8 PR #22-də ünvanlanıb (yuxarıdakı bölməyə bax). Root olmayan CI-da unikal uid/şəbəkə namespace-i/çarpaz-siqnal/fork-setsid testləri ATLANIR (yalnız root mühitdə işləyir); bu xassələr CI-da yoxlanmır.

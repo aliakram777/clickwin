@@ -12,6 +12,7 @@ from agents.company import Authority, Company
 from agents.registry import Registry
 from safety.approvals import Principal
 from tests.factory_keys import DISPATCHER, MOCK, OWNER, STRANGER, SYSTEM, auth_for, trust
+from tests.owner_proxy import ScopedCompany, ScopedAgentFactory
 
 ROOT = Path(__file__).resolve().parent.parent
 AGENT = Principal("programmer_x", "agent", "runtime")
@@ -33,10 +34,10 @@ def env(tmp_path):
     reg = Registry(":memory:")
     audit = tmp_path / "audit.jsonl"
     tr = trust(clock)
-    company = Company(reg, tmp_path / "company.db", audit, owners={"owner"}, clock=clock, verifier=tr.ring)
+    company = ScopedCompany(reg, tmp_path / "company.db", audit, owners={"owner"}, clock=clock, verifier=tr.ring)
 
     def make(policy=None):
-        return AgentFactory(company, tmp_path / "factory.db", audit, tmp_path / "ws", owners={"owner"}, clock=clock, policy=policy, verifier=tr.ring)
+        return ScopedAgentFactory(company, tmp_path / "factory.db", audit, tmp_path / "ws", owners={"owner"}, clock=clock, policy=policy, verifier=tr.ring)
 
     f = make()
     return f, company, reg, audit, clock, tmp_path, make

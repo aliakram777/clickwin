@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import re
+import functools
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from agents.spec import AgentSpec
+from safety.dbconn import connect
 
 DEFAULT_DB_PATH = Path("data/naymera.db")
 DEPARTMENT_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
@@ -21,6 +23,15 @@ CREATE TABLE IF NOT EXISTS agents (
     updated_at TEXT NOT NULL
 )
 """
+
+
+def _serial(fn):
+    """Reyestr əməliyyatları (yaz + commit) bağlantı kilidi altında: ipler arası implicit tranzaksiya çarpazlaşması yoxdur (audit B-5)."""
+    @functools.wraps(fn)
+    def wrapper(self, *a, **k):
+        with self._conn.lock:
+            return fn(self, *a, **k)
+    return wrapper
 
 
 class RegistryError(Exception):
@@ -39,13 +50,14 @@ class Registry:
     def __init__(self, db_path: str | Path = DEFAULT_DB_PATH) -> None:
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path))
+        self._conn = connect(str(db_path), isolation_level="")
         self._conn.execute(_SCHEMA)
         self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
 
+    @_serial
     def add(self, spec: AgentSpec, department: str) -> None:
         _check_department(department)
         spec.validate()
@@ -60,6 +72,7 @@ class Registry:
             raise RegistryError(f"agent artıq mövcuddur: {spec.name}") from exc
         self._conn.commit()
 
+    @_serial
     def update(self, spec: AgentSpec, department: str | None = None) -> None:
         spec.validate()
         if department is not None:
@@ -71,6 +84,7 @@ class Registry:
         )
         self._conn.commit()
 
+    @_serial
     def get(self, name: str) -> RegisteredAgent:
         row = self._conn.execute(
             "SELECT spec_yaml, department, created_at, updated_at FROM agents WHERE name = ?",
@@ -80,6 +94,7 @@ class Registry:
             raise RegistryError(f"agent tapılmadı: {name}")
         return _record(row)
 
+    @_serial
     def list(self, department: str | None = None) -> list[RegisteredAgent]:
         sql = "SELECT spec_yaml, department, created_at, updated_at FROM agents"
         params: tuple = ()

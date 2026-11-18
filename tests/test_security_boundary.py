@@ -23,9 +23,10 @@ from api.bootstrap import build_app
 from api.owner_gate import OwnerGate
 from runtime.factory_bootstrap import BootstrapError, FactoryStack, TrustAnchor, load_signing_config
 from safety.approvals import Principal
-from tests.factory_keys import DISPATCHER, KEY_ID, OWNER, SEED, SIGNER, SYSTEM, T0, ring, ring_with_control, trust
+from tests.factory_keys import DISPATCHER, KEY_ID, OWNER, SEED, SIGNER, SYSTEM, T0, owner_cred, ring, ring_with_control, trust
 from tests.test_agent_runtime import task, world  # noqa: F401  (fixture)
 from tests.test_api_auth import H, pair
+from tests.owner_proxy import ScopedCompany
 
 FORGED_OWNER = Principal("owner", "human", "console")
 FORGED_SYSTEM = Principal("naymera", "system", "core")
@@ -144,8 +145,8 @@ def test_P1_walker_has_teeth_positive_controls(world):
     w = world
     assert {"FactoryAdmin", "FactoryRuntime", "FactoryControl"} <= set(found(w.factory))           # etibarlı tərəf fasadlara sahibdir
     assert "Ed25519PrivateKey" in found(w.trust.dispatcher) and "TrustedSigner" in found(w.trust.signer)   # imza obyektində açar var
-    assert "AgentFactory" in found(types.SimpleNamespace(f=w.factory))
-    assert "Company" in found(types.SimpleNamespace(c=w.company)) and "CompanyAdmin" in found(w.company)
+    assert {"AgentFactory", "ScopedAgentFactory"} & set(found(types.SimpleNamespace(f=w.factory)))     # (sınaq fabriki AgentFactory alt sinfidir)
+    assert {"Company", "ScopedCompany"} & set(found(types.SimpleNamespace(c=w.company))) and "CompanyAdmin" in found(w.company)
 
 
 def test_P1b_private_signing_key_is_not_reachable_from_factory_company_verifier_or_handles(world):
@@ -197,7 +198,7 @@ def _spec(name):
 def company(tmp_path):
     clock = Clock()
     ring_, control = ring_with_control(clock)
-    c = Company(Registry(":memory:"), tmp_path / "c.db", tmp_path / "audit.jsonl", owners={"owner"}, clock=clock, verifier=ring_)
+    c = ScopedCompany(Registry(":memory:"), tmp_path / "c.db", tmp_path / "audit.jsonl", owners={"owner"}, clock=clock, verifier=ring_)
     c.test_control = control            # yalnız testin control-plane tutacağı
     c.admin.register_baseline_agent(_spec("victim"), "development", "Rol", SYSTEM)
     return c, clock
@@ -207,8 +208,9 @@ def company(tmp_path):
 def test_P2_company_admin_rejects_unsigned_and_forged_principals(company, op, call):
     c, _ = company
     before = (c.view.get("victim").authority, c.view.get("victim").budget, c.view.get("victim").status)
+    real = owner_cred("set_budget", "victim")
     for forged in (FORGED_OWNER, FORGED_SYSTEM, Principal("owner", "mock", "test"),
-                   dataclasses.replace(OWNER, id="mallory"), dataclasses.replace(OWNER, signature="A" * 86),
+                   dataclasses.replace(real, id="mallory"), dataclasses.replace(real, signature="A" * 86),
                    dataclasses.replace(SYSTEM, role="owner", kind="human", id="owner")):
         with pytest.raises(CompanyDenied) as e:
             call(c, forged)
@@ -226,7 +228,7 @@ def test_P2b_escalation_via_unsigned_owner_no_longer_works_and_signed_owner_stil
 
 
 def test_company_without_a_verifier_fails_closed_for_every_admin_operation(tmp_path):
-    c = Company(Registry(":memory:"), tmp_path / "c.db", tmp_path / "a.jsonl", owners={"owner"})
+    c = ScopedCompany(Registry(":memory:"), tmp_path / "c.db", tmp_path / "a.jsonl", owners={"owner"})
     for op, call in ADMIN_CALLS:
         with pytest.raises(CompanyDenied) as e:
             call(c, OWNER)
@@ -239,16 +241,17 @@ def test_company_rejects_expired_revoked_and_wrong_role_credentials(company):
     with pytest.raises(CompanyDenied) as e:
         c.admin.set_budget("victim", 1.0, DISPATCHER)                              # imzalıdır, amma dispetçer rolu
     assert e.value.code == "role_not_allowed"
-    short = SIGNER.owner_issuer(lambda r: ("owner", "dev"), ttl=30).from_step_up(object())
+    short = owner_cred("set_budget", "victim", ttl=30)
     c.admin.set_budget("victim", 1.0, short)
     clock.t = T0 + 31
     with pytest.raises(CompanyDenied) as e:
         c.admin.set_budget("victim", 2.0, short)
     assert e.value.code == "credential_expired"
     clock.t = T0
-    c.test_control.revoke_credential(OWNER.nonce)
+    revoked = owner_cred("set_budget", "victim")
+    c.test_control.revoke_credential(revoked.nonce)
     with pytest.raises(CompanyDenied) as e:
-        c.admin.set_budget("victim", 2.0, OWNER)
+        c.admin.set_budget("victim", 2.0, revoked)
     assert e.value.code == "credential_revoked"
     c.test_control.revoke_key(KEY_ID)
     with pytest.raises(CompanyDenied) as e:
@@ -592,6 +595,12 @@ def authenticate(p, op="create_agent", subject="programmer", phash=H, dev=None, 
     return p.stack.owner_gate.authenticate(dev.device_id, ch.id, op, subject, phash, proof)
 
 
+def owner_for(p, op, *args, dev=None, **kwargs):
+    """Sahib bu DƏQİQ əməliyyat üçün step-up edir: əhatə `console.scope(...)` ilə (əməliyyata verilən eyni arqumentlər) hesablanır."""
+    _, subject, phash = p.stack.console.scope(op, *args, **kwargs)
+    return authenticate(p, op, subject, phash, dev=dev)
+
+
 def test_P5_production_bootstrap_builds_the_factory_and_exposes_only_restricted_capabilities(prod):
     s = prod.stack
     assert isinstance(s, FactoryStack)
@@ -604,7 +613,7 @@ def test_P5_production_bootstrap_builds_the_factory_and_exposes_only_restricted_
     for f in dataclasses.fields(s):
         v = getattr(s, f.name)
         assert not isinstance(getattr(v, "__self__", None), AgentFactory) and not isinstance(v, (FactoryAdmin, FactoryControl, FactoryRuntime, AgentFactory))
-    owner = authenticate(prod)
+    owner = owner_for(prod, "create_agent", "programmer")
     agent = s.console.create_agent("programmer", owner)
     assert agent.status == "active"
 
@@ -613,7 +622,7 @@ def test_without_a_trust_anchor_there_is_no_factory_and_company_admin_is_closed(
     svc = build_app(tmp_path / "d", owner_id="owner", global_limit=0.0)
     assert svc.factory is None
     with pytest.raises(CompanyDenied) as e:
-        svc.company.admin.set_department_cost("development", 1.0, OWNER)
+        svc.company.admin.set_department_cost("development", 1.0, owner_cred("set_department_cost", "development"))
     assert e.value.code == "owner_auth_unavailable"
 
 
@@ -621,7 +630,7 @@ def test_company_must_be_built_with_the_anchors_verifier(tmp_path):
     cfg = load_signing_config({"NAYMERA_SIGNING_KEY": generate_signing_seed(), "NAYMERA_SIGNING_KEY_ID": "k-prod-001"})
     anchor = TrustAnchor(cfg)
     clock = Clock()
-    loose = Company(Registry(":memory:"), tmp_path / "c.db", tmp_path / "a.jsonl", owners={"owner"}, verifier=ring(clock))     # başqa yoxlayıcı
+    loose = ScopedCompany(Registry(":memory:"), tmp_path / "c.db", tmp_path / "a.jsonl", owners={"owner"}, verifier=ring(clock))     # başqa yoxlayıcı
     auth = AuthService(tmp_path / "auth.db", tmp_path / "a.jsonl", clock=clock)
     with pytest.raises(BootstrapError):
         anchor.build_factory(company=loose, auth=auth, owners={"owner"}, db_path=tmp_path / "f.db", audit_path=tmp_path / "a.jsonl",
@@ -655,7 +664,7 @@ def test_unauthenticated_callers_cannot_mint_an_owner_identity(prod):
 
 
 def test_valid_step_up_mints_a_short_lived_owner_identity_that_works(prod):
-    owner = authenticate(prod)
+    owner = owner_for(prod, "create_agent", "programmer")
     assert isinstance(owner, SignedPrincipal) and owner.role == "owner" and owner.kind == "human" and owner.id == "owner"
     assert owner.channel == "stepup:" + prod.dev.device_id and owner.expires_at - owner.issued_at <= 120
     a = prod.stack.console.create_agent("programmer", owner)
@@ -701,20 +710,20 @@ def test_revoked_device_cannot_obtain_or_use_owner_authentication(prod):
 
 
 def test_owner_identity_expires_quickly_and_the_key_can_be_revoked(prod):
-    owner = authenticate(prod)
+    owner = owner_for(prod, "create_agent", "programmer")
     prod.stack.console.create_agent("programmer", owner)
     prod.anchor.revoke_credential(owner.nonce)                                      # tək etibarnamə ləğvi
     with pytest.raises(FactoryDenied) as e:
         prod.stack.console.create_agent("researcher", owner)
     assert e.value.code == "credential_revoked"
-    owner2 = authenticate(prod)
+    owner2 = owner_for(prod, "create_agent", "researcher")
     prod.stack.console.create_agent("researcher", owner2)
     prod.anchor.revoke_key("k-prod-001")                                            # açar kompromisi: hamısı bağlanır
     with pytest.raises(FactoryDenied) as e:
         prod.stack.console.create_agent("data_analyst", owner2)
     assert e.value.code == "credential_revoked"
     with pytest.raises(FactoryDenied):
-        prod.stack.console.create_agent("data_analyst", authenticate(prod))
+        prod.stack.console.create_agent("data_analyst", owner_for(prod, "create_agent", "data_analyst"))
 
 
 def test_production_dispatcher_and_team_use_short_lived_credentials(prod):

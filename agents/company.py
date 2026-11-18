@@ -12,6 +12,7 @@ Qaydalar:
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import math
@@ -31,10 +32,18 @@ from agents.registry import Registry, RegistryError
 from agents.spec import KNOWN_PERMISSIONS, SENSITIVE_PERMISSIONS, AgentSpec
 from safety.approvals import Principal
 from safety.ledger import BudgetPolicy
+from safety.dbconn import connect
 
 DEFAULT_DB = Path("data/company.db")
 DEFAULT_AUDIT = Path("logs/audit.jsonl")
 DEFAULT_STEP_COST = 0.5
+# Sahib etibarnaməsinin əhatə əməliyyatı (`scope_op`) Company əməliyyatına UYĞUN olmalıdır (B-3). Dəqiq hədəf/parametr-hash fabrik sərhədində yoxlanır (Company-nin hədəf adı
+# fabrikdəki `agent_id`/rol-dan fərqlənə bilər); Company əməliyyat sinfini, imzanı/rolu/vaxtı/ləğvi və bir-dəfəlik istifadəni MÜSTƏQİL yoxlayır.
+COMPANY_OP_SCOPES: dict[str, frozenset[str]] = {
+    "register_agent": frozenset({"create_agent"}), "register_baseline_agent": frozenset({"spawn"}), "set_authority": frozenset({"grant", "resolve_request"}),
+    "set_budget": frozenset({"set_budget"}), "suspend": frozenset({"stop"}), "resume": frozenset({"restart"}), "retire": frozenset({"archive"}),
+    "set_department_cost": frozenset({"set_department_cost"}),
+}
 DEPARTMENTS = {
     "research": "Research", "development": "Development", "finance": "Finance", "security": "Security",
     "marketing": "Marketing", "sales": "Sales", "operations": "Operations", "support": "Support",
@@ -48,6 +57,7 @@ _SCHEMA = [
         max_task_cost REAL NOT NULL, budget REAL NOT NULL, status TEXT NOT NULL,
         created_at REAL NOT NULL, updated_at REAL NOT NULL)""",
     "CREATE TABLE IF NOT EXISTS company_departments (department TEXT PRIMARY KEY, step_cost REAL NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS company_used_credentials (nonce TEXT PRIMARY KEY, op TEXT NOT NULL, used_at REAL NOT NULL)",
 ]
 
 
@@ -116,7 +126,7 @@ class _Core:
         self.clock = clock
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=30)
+        self.conn = connect(str(db_path), isolation_level=None, timeout=30)
         self.conn.row_factory = sqlite3.Row
         for stmt in _SCHEMA:
             self.conn.execute(stmt)
@@ -165,6 +175,13 @@ class _Core:
             raise self.reject(op, "mock_rejected", "mock təsdiqi real sahib təsdiqi deyil və qəbul olunmur", principal)
         if principal.id not in self.owners:
             raise self.reject(op, "unauthorized", "əməliyyatı edən sahib siyahısında deyil", principal)
+        if getattr(principal, "scope_op", "") not in COMPANY_OP_SCOPES.get(op, frozenset()):
+            raise self.reject(op, "scope_mismatch", "sahib etibarnaməsinin əhatəsi bu əməliyyata uyğun deyil", principal)
+        try:                        # bir-dəfəlik: eyni sahib etibarnaməsi ikinci Company əməliyyatını təsdiqləyə bilmir
+            self.conn.execute("INSERT INTO company_used_credentials (nonce, op, used_at) VALUES (?, ?, ?)",
+                              (principal.nonce, op, float(self.clock())))  # type: ignore[attr-defined]
+        except sqlite3.IntegrityError:
+            raise self.reject(op, "credential_replayed", "sahib etibarnaməsi artıq istifadə olunub (bir-dəfəlik)", principal) from None
 
     @staticmethod
     def marks(principal: Principal) -> dict[str, Any]:
@@ -278,12 +295,23 @@ class CompanyView:
         return HandoffResult(True, "ötürmə təsdiqləndi", out)
 
 
+def _serial(fn):
+    """CompanyAdmin əməliyyatları (yoxla-sonra-yaz ardıcıllığı) bir kilid altında: ipler arası yarış yoxdur (audit B-5)."""
+    @functools.wraps(fn)
+    def wrapper(self, *a, **k):
+        with self._core.conn.lock:
+            return fn(self, *a, **k)
+    return wrapper
+
+
+
 class CompanyAdmin:
     """Yalnız sahib/kanal adapterləri üçün. Agentlərə, CEO-ya və LLM-ə verilmir."""
 
     def __init__(self, core: _Core) -> None:
         self._core = core
 
+    @_serial
     def register_agent(self, spec: AgentSpec, department: str, role: str, authority: Authority, budget: float,
                        principal: Principal) -> CompanyAgent:
         c = self._core
@@ -314,6 +342,7 @@ class CompanyAdmin:
                 permissions=sorted(authority.permissions), budget=float(budget), **c.marks(principal))
         return CompanyView(c).get(spec.name)
 
+    @_serial
     def register_baseline_agent(self, spec: AgentSpec, department: str, role: str, principal: Principal) -> CompanyAgent:
         """MƏHDUD agent qeydiyyatı: səlahiyyət HƏMİŞƏ {read_files} ∩ spec, həssas icazə yox, ötürmə yox, tapşırıq/büdcə 0. Sistem (NAYMERA) və sahib
         çağıra bilər; agent çağıra bilməz. Genişləndirmə yalnız sahib tərəfindən (`set_authority`/`set_budget`)."""
@@ -344,6 +373,7 @@ class CompanyAdmin:
                 permissions=sorted(authority.permissions), budget=0.0, **c.marks(principal))
         return CompanyView(c).get(spec.name)
 
+    @_serial
     def suspend(self, name: str, principal: Principal) -> CompanyAgent:
         """Geri qaytarıla bilən dayandırma: effektiv icazələr boşaldılır, səlahiyyət/büdcə saxlanılır. Sistem və ya sahib (azaltma)."""
         c = self._core
@@ -362,6 +392,7 @@ class CompanyAdmin:
         c.audit("company_agent_suspended", agent=name, status=status, **c.marks(principal))
         return CompanyView(c).get(name)
 
+    @_serial
     def resume(self, name: str, principal: Principal) -> CompanyAgent:
         """Əvvəlki səlahiyyəti BƏRPA edir (yeni səlahiyyət vermir). Sahibin dayandırdığını yalnız sahib davam etdirə bilər."""
         c = self._core
@@ -381,6 +412,7 @@ class CompanyAdmin:
         c.audit("company_agent_resumed", agent=name, **c.marks(principal))
         return CompanyView(c).get(name)
 
+    @_serial
     def set_authority(self, name: str, authority: Authority, principal: Principal) -> CompanyAgent:
         c = self._core
         op = "set_authority"
@@ -403,6 +435,7 @@ class CompanyAdmin:
                 after=sorted(authority.permissions), **c.marks(principal))
         return CompanyView(c).get(name)
 
+    @_serial
     def set_budget(self, name: str, budget: float, principal: Principal) -> CompanyAgent:
         c = self._core
         op = "set_budget"
@@ -421,6 +454,7 @@ class CompanyAdmin:
         c.audit("company_budget_changed", agent=name, before=agent.budget, after=float(budget), **c.marks(principal))
         return CompanyView(c).get(name)
 
+    @_serial
     def retire(self, name: str, principal: Principal) -> CompanyAgent:
         c = self._core
         op = "retire"
@@ -435,6 +469,7 @@ class CompanyAdmin:
         c.audit("company_agent_retired", agent=name, **c.marks(principal))
         return CompanyView(c).get(name)
 
+    @_serial
     def set_department_cost(self, department: str, cost: float, principal: Principal) -> None:
         c = self._core
         op = "set_department_cost"

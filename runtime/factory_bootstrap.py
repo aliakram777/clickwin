@@ -53,13 +53,39 @@ def _pairs(text: str) -> list[tuple[str, str]]:
     return out
 
 
+def _read_key_file(path: str) -> str:
+    """`NAYMERA_SIGNING_KEY_FILE`: adi fayl (symlink YOX), yalnız sahibə (0600/0400), cari istifadəçiyə məxsus, kiçik. Əks halda açıq xəta."""
+    import os
+    import stat
+    try:
+        st = os.lstat(path)
+    except OSError as exc:
+        raise BootstrapError(f"imza açarı faylı oxuna bilmir: {exc.strerror}") from None
+    if not stat.S_ISREG(st.st_mode):
+        raise BootstrapError("imza açarı faylı adi fayl olmalıdır (symlink/qovluq rədd edilir)")
+    if st.st_mode & 0o077:
+        raise BootstrapError("imza açarı faylının icazəsi çox genişdir: yalnız sahib oxuya bilməlidir (chmod 600)")
+    if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
+        raise BootstrapError("imza açarı faylı cari istifadəçiyə məxsus deyil")
+    if st.st_size > 256:
+        raise BootstrapError("imza açarı faylı gözlənilməz dərəcədə böyükdür")
+    with open(path, "r", encoding="ascii") as fh:
+        return fh.read().strip()
+
+
 def load_signing_config(env: Mapping[str, str]) -> SigningConfig | None:
-    """Heç bir imza dəyişəni yoxdursa None (imtiyazlı əməliyyatlar bağlı). Qismən/yanlış/zəif konfiqurasiya `BootstrapError` verir (açıq xəta)."""
+    """Heç bir imza dəyişəni yoxdursa None (imtiyazlı əməliyyatlar bağlı). Qismən/yanlış/zəif konfiqurasiya `BootstrapError` verir (açıq xəta).
+    Açar ya `NAYMERA_SIGNING_KEY` (mühit), ya `NAYMERA_SIGNING_KEY_FILE` (0600 fayl; tövsiyə olunur) ilə verilir, ikisi birlikdə deyil."""
     raw_key = (env.get("NAYMERA_SIGNING_KEY") or "").strip()
+    key_file = (env.get("NAYMERA_SIGNING_KEY_FILE") or "").strip()
+    if raw_key and key_file:
+        raise BootstrapError("NAYMERA_SIGNING_KEY və NAYMERA_SIGNING_KEY_FILE birlikdə verilə bilməz")
+    if key_file:
+        raw_key = _read_key_file(key_file)
     key_id = (env.get("NAYMERA_SIGNING_KEY_ID") or "").strip()
     verify = (env.get("NAYMERA_VERIFY_KEYS") or "").strip()
     revoked = (env.get("NAYMERA_REVOKED_KEYS") or "").strip()
-    if not (raw_key or key_id or verify or revoked):
+    if not (raw_key or key_file or key_id or verify or revoked):
         return None
     if not raw_key or not key_id:
         raise BootstrapError("imza konfiqurasiyası natamamdır: NAYMERA_SIGNING_KEY və NAYMERA_SIGNING_KEY_ID birlikdə tələb olunur")
@@ -79,7 +105,7 @@ def load_signing_config(env: Mapping[str, str]) -> SigningConfig | None:
     return SigningConfig(key_id, seed, retired, revoked_ids)
 
 
-CONSOLE_OPS = ("spawn", "assign", "cancel_task", "stop", "restart", "archive", "create_agent", "grant", "set_budget", "set_policy", "resolve_request", "delete")
+CONSOLE_OPS = ("spawn", "assign", "cancel_task", "stop", "restart", "archive", "create_agent", "grant", "set_budget", "set_policy", "resolve_request", "delete", "scope")
 _BACKENDS: dict[str, Any] = {}      # modul-səviyyəli reyestr: OwnerConsole obyektində, onun funksiya default/closure/atributlarında fabrikə istinad YOXDUR
 
 
@@ -141,6 +167,10 @@ class OwnerConsole:
     def delete(self, *a: Any, **kw: Any) -> Any:
         return self._call("delete", a, kw)
 
+    def scope(self, *a: Any, **kw: Any) -> Any:
+        """Sahibin step-up ilə imzalayacağı `(əməliyyat, hədəf, parametr-hash)`: `console.scope("set_budget", agent_id, 2.0)`."""
+        return self._call("scope", a, kw)
+
 
 @dataclass(frozen=True)
 class FactoryStack:
@@ -176,6 +206,9 @@ class TrustAnchor:
     def revoke_credential(self, nonce: str) -> None:
         self._control.revoke_credential(nonce)
 
+    def revoke_channel(self, channel: str) -> None:
+        self._control.revoke_channel(channel)
+
     def build_factory(self, *, company: Company, auth: AuthService, owners: Iterable[str], db_path: str | Path, audit_path: str | Path,
                       workspace_root: str | Path, team_db: str | Path, orchestrator_factory: Callable[[AgentLLMRunner], Orchestrator],
                       router: Any, approvals_reader: Any = None, memory: Callable[[], Any] | None = None, global_limit: Callable[[], float | None] | None = None,
@@ -191,6 +224,11 @@ class TrustAnchor:
                                      approvals=approvals_reader)
         team = TeamRunner(factory, dispatcher, team_db, audit_path, system=self._signer.system_issuer(), clock=clock)
         gate = OwnerGate(auth, self._signer.owner_issuer(receipt_consumer(auth)))
+        # B-4: cihaz ləğv olunanda onun step-up ilə verilmiş BÜTÜN sahib etibarnamələri dərhal ləğv olunur; başlanğıcda artıq ləğv olunmuş cihazlar da tətbiq edilir
+        auth.add_revocation_listener(lambda device_id: self._control.revoke_channel(f"stepup:{device_id}"))
+        for dev in auth.list_devices():
+            if dev.get("status") != "active":
+                self._control.revoke_channel(f"stepup:{dev['device_id']}")
         root = Path(program_root) if program_root is not None else Path(workspace_root) / "agent_programs"
         root.mkdir(parents=True, exist_ok=True)
         iso = {"uid_pool": DEFAULT_UID_POOL, **(agent_isolation or {})}   # defolt: unikal uid + server-təsdiqli izolyasiya MƏCBURİDİR (qapalı qalır)

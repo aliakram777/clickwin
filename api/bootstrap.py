@@ -25,6 +25,7 @@ from api.chat import ChatService, ConversationStore, HybridReplyEngine, RuleAssi
 from api.events import ApprovalEventChannel
 from api.jobs import JobService
 from safety.approvals import ApprovalService
+from runtime.brokered_llm import BrokeredRouter
 from runtime.factory_bootstrap import FactoryStack, TrustAnchor
 from safety.ledger import CostLedger
 
@@ -73,10 +74,11 @@ def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: fl
     # Hibrid AI: Cloud (burada MOCK: real provayder/açar qoşulmayıb) və Local (model yoxdur: NOT CONFIGURED). Rejim: AUTO.
     router = HybridRouter(cloud_engine if cloud_engine is not None else CloudEngine(llm),
                           local_engine if local_engine is not None else LocalEngine(None), AiStore(d / "ai.db"), stop_path=stop)
-    jobs = JobService(LLMPlanner(RoutedLLM(router), company.view.department_costs()), durable, d / "jobs.db")
+    llm_router = BrokeredRouter(router, orch.broker)     # A-8: söhbət/plan LLM çağırışları da Effect Broker (Gate/Ledger) üzərindən
+    jobs = JobService(LLMPlanner(RoutedLLM(llm_router), company.view.department_costs()), durable, d / "jobs.db")
     rules = RuleAssistant(lambda: {"pending_approvals": len(approvals.reader.pending())})
     chat = ChatService(ConversationStore(d / "chat.db"), HybridReplyEngine(
-        router, lambda: memory.reader.search("", category="note", limit=3), rules, allow_simulated=False))
+        llm_router, lambda: memory.reader.search("", category="note", limit=3), rules, allow_simulated=False))
     auth = AuthService(d / "auth.db", audit, owner_id=owner_id)
     app = ApiApp(auth=auth, chat=chat, events=events, stop_path=stop, gateway=approvals.gateway,
                  reader=approvals.reader, memory=memory, company=company.view, proactive=proactive, jobs=jobs,

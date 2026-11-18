@@ -200,6 +200,88 @@ def _finite(v: Any) -> bool:
     return not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v) and v >= 0
 
 
+# --- sahib əməliyyatlarının DƏQİQ əhatəsi (B-3): əməliyyat adı + hədəf (subject) + parametrlərin SHA-256-sı ---
+
+def _sha_text(v: Any) -> str:
+    return hashlib.sha256(str(v).encode("utf-8")).hexdigest()
+
+
+def _s_spawn(role_id: Any, *, purpose: Any = "") -> tuple[str, dict]:
+    return str(role_id), {"purpose": str(purpose)}
+
+
+def _s_assign(agent_id: Any, title: Any, prompt: Any, *, kind: Any = None, permission: Any = "read_files", cost: Any = 0.0, op_id: Any = None,
+              parent_task_id: Any = "") -> tuple[str, dict]:
+    return str(agent_id), {"title": str(title), "prompt_sha256": _sha_text(prompt), "kind": kind, "permission": str(permission), "cost": cost, "op_id": op_id,
+                           "parent_task_id": str(parent_task_id)}
+
+
+def _s_cancel_task(task_id: Any) -> tuple[str, dict]:
+    return str(task_id), {}
+
+
+def _s_stop(agent_id: Any, reason: Any = "") -> tuple[str, dict]:
+    return str(agent_id), {"reason": str(reason)}
+
+
+def _s_agent_only(agent_id: Any) -> tuple[str, dict]:
+    return str(agent_id), {}
+
+
+def _s_create_agent(role_id: Any, *, permissions: Any = ("read_files",), sensitive_ok: Any = False, delegate_to: Any = (), budget: Any = 0.0,
+                    max_task_cost: Any = 0.0) -> tuple[str, dict]:
+    return str(role_id), {"permissions": sorted(str(x) for x in permissions), "sensitive_ok": bool(sensitive_ok), "delegate_to": sorted(str(x) for x in delegate_to),
+                          "budget": budget, "max_task_cost": max_task_cost}
+
+
+def _s_grant(agent_id: Any, *, permissions: Any, sensitive_ok: Any = False, delegate_to: Any = (), max_task_cost: Any = 0.0) -> tuple[str, dict]:
+    return str(agent_id), {"permissions": sorted(str(x) for x in permissions), "sensitive_ok": bool(sensitive_ok), "delegate_to": sorted(str(x) for x in delegate_to),
+                           "max_task_cost": max_task_cost}
+
+
+def _s_set_budget(agent_id: Any, budget: Any) -> tuple[str, dict]:
+    return str(agent_id), {"budget": budget}
+
+
+def _s_set_policy(**changes: Any) -> tuple[str, dict]:
+    return "policy", dict(changes)
+
+
+def _s_resolve_request(request_id: Any, approve: Any) -> tuple[str, dict]:
+    return str(request_id), {"approve": bool(approve)}
+
+
+_SCOPES: dict[str, Callable[..., tuple[str, dict]]] = {
+    "spawn": _s_spawn, "assign_task": _s_assign, "cancel_task": _s_cancel_task, "stop": _s_stop, "restart": _s_agent_only, "archive": _s_agent_only,
+    "create_agent": _s_create_agent, "grant": _s_grant, "set_budget": _s_set_budget, "set_policy": _s_set_policy, "resolve_request": _s_resolve_request,
+    "delete": _s_agent_only,
+}
+_SCOPE_ALIASES = {"assign": "assign_task"}
+
+
+def owner_scope(op: str, *args: Any, **kwargs: Any) -> tuple[str, str, str]:
+    """Sahibin step-up ilə təsdiqləyəcəyi DƏQİQ əhatə: `(əməliyyat, hədəf, parametr-hash)`. Əməliyyat metoduna verilən arqumentlərlə (`principal` OLMADAN) eyni funksiya
+    ilə hesablanır; fabrik icradan əvvəl etibarnamənin əhatəsini bununla müqayisə edir."""
+    op = _SCOPE_ALIASES.get(op, op)
+    fn = _SCOPES.get(op)
+    if fn is None:
+        raise ValueError(f"naməlum sahib əməliyyatı: {str(op)[:30]}")
+    try:
+        subject, params = fn(*args, **kwargs)
+    except Exception:  # noqa: BLE001 — yanlış arqumentlər: heç bir etibarnamənin əhatəsinə uyğun gəlməyən hash (əməliyyat özü sonra FactoryDenied ilə rədd edilir)
+        subject, params = "?", {"invalid_arguments": True}
+    try:
+        body = json.dumps({"op": op, "subject": subject, "params": params}, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False, default=str)
+    except (TypeError, ValueError):
+        body = repr((op, subject, sorted(params.items(), key=lambda kv: kv[0])))
+    return op, subject, hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+class Authed(str):
+    """`who()` nəticəsi: `created_by` etiketi (str) + yoxlanmış etibarnamənin özü (`.principal`)."""
+    principal: Principal
+
+
 class _Core:
     def __init__(self, company_view: CompanyView, db_path: str | Path, audit_path: str | Path, workspace_root: str | Path, owners: Iterable[str],
                  allow_mock: bool, clock: Callable[[], float], policy: FactoryPolicy | None, verifier: Keyring | None = None) -> None:
@@ -270,9 +352,9 @@ class _Core:
         return FactoryDenied(reason, code)
 
     # --- icazə ---
-    def who(self, principal: Principal, op: str, *, owner_only: bool = False) -> str:
-        """Şəxsiyyət YALNIZ etibarlı açarla imzalanmış, vaxtı keçməmiş və ləğv olunmamış etibarnamə ilə qəbul olunur. Özü yaradılmış `Principal`
-        rədd edilir; yoxlayıcı qurulmayıbsa imtiyazlı əməliyyatlar bağlıdır."""
+    def who(self, principal: Principal, op: str, *, owner_only: bool = False, scope: tuple[str, str] | None = None) -> Authed:
+        """Şəxsiyyət YALNIZ etibarlı açarla imzalanmış, vaxtı keçməmiş və ləğv olunmamış etibarnamə ilə qəbul olunur. Özü yaradılmış `Principal` rədd edilir; yoxlayıcı qurulmayıbsa imtiyazlı
+        əməliyyatlar bağlıdır. SAHİB etibarnaməsi yalnız bu DƏQİQ əməliyyata (ad + hədəf + parametr-hash) bağlı olmalıdır və BİR DƏFƏ istifadə olunur (B-3)."""
         if not isinstance(principal, Principal):
             raise self.refuse(op, "unauthorized", "principal tələb olunur")
         if principal.kind == "agent":
@@ -283,10 +365,24 @@ class _Core:
         if principal.kind == "system":
             if owner_only:
                 raise self.refuse(op, "owner_only", "bu əməliyyat yalnız sahibə məxsusdur", principal)
-            return f"system:{principal.id}"
+            out = Authed(f"system:{principal.id}")
+            out.principal = principal
+            return out
         if principal.id not in self.owners:
             raise self.refuse(op, "unauthorized", "əməliyyatı edən sahib siyahısında deyil", principal)
-        return f"owner:{principal.id}"
+        sp = principal            # SignedPrincipal (yoxlama keçdi)
+        want = (op, scope[0], scope[1]) if scope is not None else None
+        if want is None or (getattr(sp, "scope_op", ""), getattr(sp, "scope_subject", ""), getattr(sp, "scope_hash", "")) != want:
+            raise self.refuse(op, "scope_mismatch", "sahib etibarnaməsi bu dəqiq əməliyyata/hədəfə/parametrlərə bağlı deyil", principal)
+        with self.lock:
+            try:
+                self.conn.execute("INSERT INTO factory_used_credentials (nonce, task_id, action, used_at) VALUES (?, ?, ?, ?)",
+                                  (sp.nonce, scope[0][:80], op, float(self.clock())))
+            except sqlite3.IntegrityError:
+                raise self.refuse(op, "credential_replayed", "sahib etibarnaməsi artıq istifadə olunub (bir-dəfəlik)", principal) from None
+        out = Authed(f"owner:{principal.id}")
+        out.principal = principal
+        return out
 
     def who_dispatcher(self, principal: Principal, op: str) -> str:
         """Icra qatı (dispetçer) əməliyyatları üçün: yalnız imzalanmış `dispatcher` rolu."""
@@ -567,9 +663,15 @@ class FactoryControl:
         self._c = core
         self._p = priv
 
+    @staticmethod
+    def scope(op: str, *args: Any, **kwargs: Any) -> tuple[str, str, str]:
+        """Sahibin step-up ilə imzalayacağı `(əməliyyat, hədəf, parametr-hash)` (argumentlər əməliyyata verilənlərlə eynidir, `principal` olmadan)."""
+        return owner_scope(op, *args, **kwargs)
+
     def spawn(self, role_id: str, principal: Principal, *, purpose: str = "") -> AgentRecord:
         c, op = self._c, "spawn"
-        created_by = c.who(principal, op)
+        created_by = c.who(principal, op, scope=owner_scope(op, role_id, purpose=purpose)[1:])
+        principal = created_by.principal
         role = ROLE_CATALOG.get(role_id) if isinstance(role_id, str) else None
         if role is None:
             raise c.refuse(op, "unknown_role", f"naməlum rol: {str(role_id)[:30]}", principal)
@@ -579,14 +681,16 @@ class FactoryControl:
     def assign(self, agent_id: str, title: str, prompt: str, principal: Principal, *, kind: str | None = None, permission: str = "read_files",
                cost: float = 0.0, op_id: str | None = None, parent_task_id: str = "") -> TaskRecord:
         c, op = self._c, "assign_task"
-        created_by = c.who(principal, op)
+        created_by = c.who(principal, op, scope=owner_scope(op, agent_id, title, prompt, kind=kind, permission=permission, cost=cost, op_id=op_id,
+                                                           parent_task_id=parent_task_id)[1:])
+        principal = created_by.principal
         agent = c.must_agent(agent_id, op, principal)
         return c.assign(op, agent, title, prompt, kind=kind, permission=permission, cost=cost, op_id=op_id, parent_task_id=parent_task_id,
                         created_by=created_by, principal=principal, trusted_prompt=True)
 
     def cancel_task(self, task_id: str, principal: Principal) -> TaskRecord:
         c, op = self._c, "cancel_task"
-        c.who(principal, op)
+        principal = c.who(principal, op, scope=owner_scope(op, task_id)[1:]).principal
         with c.lock:
             cur = c.conn.execute("UPDATE factory_tasks SET state = 'cancelled', updated_at = ? WHERE task_id = ? AND state IN ('queued','awaiting_approval')",
                                  (float(c.clock()), task_id))
@@ -598,7 +702,7 @@ class FactoryControl:
 
     def stop(self, agent_id: str, principal: Principal, reason: str = "") -> AgentRecord:
         c, op = self._c, "stop"
-        c.who(principal, op)
+        principal = c.who(principal, op, scope=owner_scope(op, agent_id, reason)[1:]).principal
         a = c.must_agent(agent_id, op, principal)
         if a.status != "active":
             raise c.refuse(op, f"agent_{a.status}", "yalnız aktiv agent dayandırıla bilər", principal, agent_id)
@@ -617,7 +721,7 @@ class FactoryControl:
 
     def restart(self, agent_id: str, principal: Principal) -> AgentRecord:
         c, op = self._c, "restart"
-        c.who(principal, op)
+        principal = c.who(principal, op, scope=owner_scope(op, agent_id)[1:]).principal
         a = c.must_agent(agent_id, op, principal)
         if a.status != "stopped":
             raise c.refuse(op, f"agent_{a.status}" if a.status != "active" else "not_stopped", "yalnız dayandırılmış agent yenidən başladıla bilər", principal, agent_id)
@@ -631,7 +735,7 @@ class FactoryControl:
 
     def archive(self, agent_id: str, principal: Principal) -> AgentRecord:
         c, op = self._c, "archive"
-        c.who(principal, op)
+        principal = c.who(principal, op, scope=owner_scope(op, agent_id)[1:]).principal
         a = c.must_agent(agent_id, op, principal)
         if a.status not in ("active", "stopped"):
             raise c.refuse(op, f"agent_{a.status}", "agent artıq arxivlənib və ya silinib", principal, agent_id)
@@ -650,7 +754,9 @@ class FactoryAdmin(FactoryControl):
     def create_agent(self, role_id: str, principal: Principal, *, permissions: Sequence[str] = ("read_files",), sensitive_ok: bool = False,
                      delegate_to: Sequence[str] = (), budget: float = 0.0, max_task_cost: float = 0.0) -> AgentRecord:
         c, op = self._c, "create_agent"
-        created_by = c.who(principal, op, owner_only=True)
+        created_by = c.who(principal, op, owner_only=True, scope=owner_scope(op, role_id, permissions=permissions, sensitive_ok=sensitive_ok, delegate_to=delegate_to,
+                                                                            budget=budget, max_task_cost=max_task_cost)[1:])
+        principal = created_by.principal
         role = ROLE_CATALOG.get(role_id) if isinstance(role_id, str) else None
         if role is None:
             raise c.refuse(op, "unknown_role", f"naməlum rol: {str(role_id)[:30]}", principal)
@@ -671,7 +777,8 @@ class FactoryAdmin(FactoryControl):
     def grant(self, agent_id: str, principal: Principal, *, permissions: Sequence[str], sensitive_ok: bool = False,
               delegate_to: Sequence[str] = (), max_task_cost: float = 0.0) -> AgentRecord:
         c, op = self._c, "grant"
-        c.who(principal, op, owner_only=True)
+        principal = c.who(principal, op, owner_only=True, scope=owner_scope(op, agent_id, permissions=permissions, sensitive_ok=sensitive_ok, delegate_to=delegate_to,
+                                                                           max_task_cost=max_task_cost)[1:]).principal
         a = c.must_agent(agent_id, op, principal)
         role = ROLE_CATALOG[a.role_id]
         if not set(permissions) <= set(role.default_permissions) | set(role.requestable_permissions) | set(role.sensitive_requestable):
@@ -685,7 +792,7 @@ class FactoryAdmin(FactoryControl):
 
     def set_budget(self, agent_id: str, budget: float, principal: Principal) -> AgentRecord:
         c, op = self._c, "set_budget"
-        c.who(principal, op, owner_only=True)
+        principal = c.who(principal, op, owner_only=True, scope=owner_scope(op, agent_id, budget)[1:]).principal
         a = c.must_agent(agent_id, op, principal)
         if not _finite(budget) or budget > c.policy.global_budget_cap + 1e-9:
             raise c.refuse(op, "budget_cap", "büdcə qlobal tavanı aşır (tavanı yalnız sahib qaldırır)", principal, agent_id)
@@ -695,7 +802,7 @@ class FactoryAdmin(FactoryControl):
 
     def set_policy(self, principal: Principal, **changes: Any) -> FactoryPolicy:
         c, op = self._c, "set_policy"
-        c.who(principal, op, owner_only=True)
+        principal = c.who(principal, op, owner_only=True, scope=owner_scope(op, **changes)[1:]).principal
         cur = c.policy
         for k, v in changes.items():
             if k not in cur.__dict__:
@@ -713,7 +820,7 @@ class FactoryAdmin(FactoryControl):
 
     def resolve_request(self, request_id: str, approve: bool, principal: Principal) -> PermissionRequest:
         c, op = self._c, "resolve_request"
-        c.who(principal, op, owner_only=True)
+        principal = c.who(principal, op, owner_only=True, scope=owner_scope(op, request_id, approve)[1:]).principal
         with c.lock:
             row = c.conn.execute("SELECT * FROM factory_requests WHERE request_id = ?", (request_id,)).fetchone()
             if row is None or row["state"] != "pending":
@@ -734,7 +841,7 @@ class FactoryAdmin(FactoryControl):
 
     def delete(self, agent_id: str, principal: Principal) -> AgentRecord:
         c, op = self._c, "delete"
-        c.who(principal, op, owner_only=True)
+        principal = c.who(principal, op, owner_only=True, scope=owner_scope(op, agent_id)[1:]).principal
         a = c.must_agent(agent_id, op, principal)
         if a.status != "archived":
             raise c.refuse(op, "not_archived", "yalnız arxivlənmiş agent silinə bilər", principal, agent_id)

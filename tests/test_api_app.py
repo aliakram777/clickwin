@@ -29,6 +29,7 @@ from safety.approvals import ApprovalService, Principal
 from safety.ledger import BudgetPolicy, CostLedger, reconcile
 from tests.factory_keys import OWNER as OWNER_SIGNED, T0, ring
 from tests.p256_tools import Keypair
+from tests.owner_proxy import ScopedCompany
 
 ROOT = Path(__file__).resolve().parent.parent
 OWNER_P = OWNER_SIGNED  # sahib etibarnaməsi (test etibar çıpası ilə imzalanıb)
@@ -102,7 +103,7 @@ def world(tmp_path):
     audit = tmp_path / "audit.jsonl"
     stop = tmp_path / "STOP"
     reg = Registry(":memory:")
-    company = Company(reg, tmp_path / "company.db", audit, owners={"owner"}, verifier=ring(lambda: T0))
+    company = ScopedCompany(reg, tmp_path / "company.db", audit, owners={"owner"}, verifier=ring(lambda: T0))
 
     def spec(name, perms):
         return AgentSpec(name=name, purpose="p", tools=[], permissions=list(perms), inputs=["sorgu"],

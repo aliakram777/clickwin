@@ -13,6 +13,7 @@ from agents.durable import DurableRunner, WorkflowError
 from agents.mobile import clean_text
 from agents.memory import detect_secrets
 from agents.workflow import PlanStep
+from safety.dbconn import connect
 
 
 class JobNotFound(KeyError):
@@ -52,7 +53,7 @@ class JobService:
         self.planner, self.durable, self.clock = planner, durable, clock
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=30)
+        self._conn = connect(str(db_path), isolation_level=None, timeout=30)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, goal TEXT NOT NULL, status TEXT NOT NULL, "

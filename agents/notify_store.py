@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+from safety.dbconn import connect
 
 DEFAULT_DB = Path("data/notifications.db")
 STATUSES = ("active", "acked", "snoozed", "dismissed")
@@ -26,7 +27,7 @@ class NotificationStore:
         self.clock = clock
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=30)
+        self._conn = connect(str(db_path), isolation_level=None, timeout=30)
         self._conn.row_factory = sqlite3.Row
         for stmt in (
             "CREATE TABLE IF NOT EXISTS notif_state (key TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'active', "
