@@ -27,7 +27,7 @@ def test_require_privileged_mode_refuses_to_run_without_root_instead_of_skipping
 def test_default_mode_prints_an_explicit_warning_when_isolation_tests_are_skipped():
     if IS_ROOT:
         return                                                                               # root-da atlanma olmur: xəbərdarlıq mənasızdır
-    res = run({"NAYMERA_REQUIRE_PRIVILEGED": ""}, "tests/test_agent_isolation.py", "-k", "reach or import_repo")
+    res = run({"NAYMERA_REQUIRE_PRIVILEGED": ""}, "tests/test_isolation_limits.py")
     assert "izolyasiya testi ATLANDI" in res.stdout and "YOXLANMAYIB" in res.stdout, res.stdout[-600:]
 
 

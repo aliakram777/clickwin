@@ -17,7 +17,7 @@ READ_WORLD_READABLE = '''
 import json, os
 def main(c):
     r = {}
-    for name, path in (("world_file", c.args[0]), ("server_cmdline", f"/proc/{os.getppid()}/cmdline"), ("repo_status", c.args[1])):
+    for name, path in (("world_file", c.args[0]), ("server_cmdline", f"/proc/{os.getppid()}/cmdline")):
         try:
             r[name] = "READ:" + open(path, "rb").read(12).decode("latin-1")
         except Exception as e:
@@ -45,7 +45,7 @@ def test_KNOWN_LIMITATION_agents_can_read_world_readable_host_files_but_not_serv
         repo = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "STATUS.md")
         r = out(prod.stack.agents.run_session(a.agent_id, program(prod, "rd.py", READ_WORLD_READABLE), args=[f, repo, str(tmp_path / "data")], timeout_s=20))
         assert r["world_file"].startswith("READ:world-reada")            # HƏD: fayl sistemi izolyasiyası YOXDUR
-        assert r["repo_status"].startswith("READ:")                     # HƏD: depo mənbəyi oxunur
+        # (depo mənbəyinin oxunması mühitdən asılıdır: runner-də ev qovluğu 0750 ola bilər; ona görə burada İDDİA EDİLMİR)
         assert r["server_cmdline"].startswith("READ:")                  # HƏD: /proc/<server>/cmdline oxunur (gizli məlumat komanda sətrinə YAZILMAMALIDIR)
         assert r["server_environ"].startswith("DENIED")                 # qorunur: server mühiti (açarlar)
         assert r["data_dir"].startswith("DENIED")                       # qorunur: server məlumat qovluğu (0700)
