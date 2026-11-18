@@ -14,6 +14,7 @@ import struct
 
 PROTO = 1
 MAX_BODY = 64 * 1024
+MAX_DEPTH = 6          # JSON iç-içəlik həddi (protokolun özü ən çox 4 səviyyə işlədir); ayrışdırmadan ƏVVƏL yoxlanır
 MAC_LEN = 32
 C2S = b"c2s"
 S2C = b"s2c"
@@ -33,6 +34,29 @@ def _mac(key: bytes, direction: bytes, seq: int, body: bytes) -> bytes:
 
 def _no_constant(name: str):
     raise ValueError(f"constant {name}")
+
+
+def check_depth(body: bytes, limit: int = MAX_DEPTH) -> None:
+    """JSON gövdəsinin `[`/`{` iç-içəliyini (sətirlərdən kənarda) xətti keçidlə sayır; hədd aşılarsa `json.loads` ÇAĞIRILMIR (RecursionError/yaddaş hücumu yoxdur)."""
+    depth, in_str, esc = 0, False, False
+    for b in body:
+        if in_str:
+            if esc:
+                esc = False
+            elif b == 0x5C:      # \
+                esc = True
+            elif b == 0x22:      # "
+                in_str = False
+        elif b == 0x22:
+            in_str = True
+        elif b == 0x5B or b == 0x7B:
+            depth += 1
+            if depth > limit:
+                raise WireError("too_deep")
+        elif b == 0x5D or b == 0x7D:
+            depth -= 1
+            if depth < 0:
+                raise WireError("bad_json")
 
 
 class Writer:
@@ -70,9 +94,10 @@ class Reader:
             self._seq += 1
             if not hmac.compare_digest(mac, _mac(self._key, self._dir, self._seq, body)):
                 raise WireError("bad_mac")
+            check_depth(body)
             try:
                 obj = json.loads(body.decode("utf-8"), parse_constant=_no_constant)
-            except (ValueError, UnicodeDecodeError):
+            except (ValueError, UnicodeDecodeError, RecursionError, MemoryError, OverflowError):
                 raise WireError("bad_json") from None
             if not isinstance(obj, dict):
                 raise WireError("bad_json")
