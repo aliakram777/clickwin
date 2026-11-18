@@ -3,6 +3,7 @@
 Yenilənib: 2026-11-18
 
 ## Cari mərhələ
+Mərhələ 18.0 — Core Contracts (`kernel/`: Goal, Plan, Event, Capability, ImprovementProposal + OwnerDecision, idempotent SQLite event jurnalı; yalnız müqavilələr, icra/icazə YOXDUR, Stage 17 sərhədlərinə toxunulmayıb; PR təsdiq gözləyir). Ətraflı: [KERNEL_CONTRACTS.md](KERNEL_CONTRACTS.md). Əvvəlki:
 Mərhələ 17 — Real AI runtime və avtonom agent fabrikası (məhdud agent yaradılışı, həyat dövrü, çoxagentli axın, məhsul bünövrəsi; real provayder/alət YOXDUR; APK build EDİLMƏYİB, PR təsdiq gözləyir). Əvvəlki: Mərhələ 16 — Daimi hibrid AI beyni (Cloud + Local; real provayder/model/səs YOXDUR). Əvvəlki: Mərhələ 15 — Android build hazırlığı və audit (APK build EDİLMƏYİB: `dl.google.com` bloklu; Android-dan asılı olmayan Kotlin qatı JVM-də kompilyasiya və həqiqi backend ilə sınanıb; PR təsdiq gözləyir). Əvvəlki PR-lər: #1–#16 (PR #16 CI uğurlu, birləşdirilməyib). Yol xəritəsi: [ROADMAP.md](ROADMAP.md).
 
 ## Hazırdır
@@ -124,3 +125,4 @@ Mərhələ 17 — Real AI runtime və avtonom agent fabrikası (məhdud agent ya
 
 ## Qeyd
 Bu bölmədə gəlir/qazanc haqqında iddia yazılmır.
+- Mərhələ 18.0 / Core Contracts — `kernel/common.py`, `goal.py`, `plan.py`, `events.py`, `capability.py`, `proposal.py`, `eventlog.py`: dəyişməz versiyalı müqavilələr, ciddi sxem, UTC, sirr rədd, etibarsız mətn sərhədi, sahib qərarı məzmun hash-inə bağlı və AYRI, qorunan komponent ⇒ yüksək risk, idempotent append-only jurnal. Testlər: `tests/test_kernel_contracts.py`. Məhdudiyyətlər: KERNEL_CONTRACTS.md (kernel döngüsü/Goal Store/provayder qatı yoxdur; `OwnerDecision` kriptoqrafik doğrulanmır).
