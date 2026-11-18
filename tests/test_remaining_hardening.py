@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from agents.agent_factory import FactoryDenied, owner_scope
-from agents.company import CompanyDenied
+from agents.company import CompanyDenied, company_scope
 from agents.factory_auth import CredentialError, decode_signing_seed, generate_signing_seed, validate_signing_seed
 from agents.llm import GuardedLLM, LLMBlocked, LLMConfig, LLMRequest
 from agents.registry import Registry
@@ -40,17 +40,17 @@ ROOT = Path(__file__).resolve().parent.parent
 IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 
 
-def cred_for(op, *a, **k):
-    """DƏQİQ `(op, hədəf, parametr-hash)` əhatəli yeni bir-dəfəlik sahib etibarnaməsi (test etibar çıpası)."""
-    _, subject, digest = owner_scope(op, *a, **k)
-    return owner_cred(op, subject, digest)
+def cred_for(w, op, *a, **k):
+    """DƏQİQ `(op, hədəf, fabrik hash, şirkət təsiri)` əhatəli yeni bir-dəfəlik sahib etibarnaməsi (test etibar çıpası)."""
+    name, subject, digest, company = w.factory.admin.scope(op, *a, **k)
+    return owner_cred(name, subject, digest, company=company)
 
 
 # ============================================================================ B-3: etibarnamə DƏQİQ əməliyyata/hədəfə/parametrə bağlıdır
 
 def test_B3_credential_for_one_role_cannot_create_another_role(world):
     w = world
-    c = cred_for("create_agent", "programmer")
+    c = cred_for(w, "create_agent", "programmer")
     with pytest.raises(FactoryDenied) as e:
         w.factory.admin.create_agent("researcher", c)
     assert e.value.code == "scope_mismatch"
@@ -61,12 +61,12 @@ def test_B3_credential_for_one_role_cannot_create_another_role(world):
 def test_B3_credential_for_one_payload_cannot_be_used_with_a_wider_payload(world):
     w = world
     a = w.factory.control.spawn("programmer", SYSTEM)
-    c = cred_for("set_budget", a.agent_id, 1.0)
+    c = cred_for(w, "set_budget", a.agent_id, 1.0)
     with pytest.raises(FactoryDenied) as e:                                           # 1.0 AZN təsdiqləndi, 99.0 AZN istənir
         w.factory.admin.set_budget(a.agent_id, 99.0, c)
     assert e.value.code == "scope_mismatch"
     assert w.factory.view.agent(a.agent_id).budget == 0.0
-    wide = cred_for("create_agent", "programmer")
+    wide = cred_for(w, "create_agent", "programmer")
     with pytest.raises(FactoryDenied) as e2:                                          # eyni rol, əlavə icazə (publish)
         w.factory.admin.create_agent("programmer", wide, permissions=("read_files", "publish"), sensitive_ok=True)
     assert e2.value.code == "scope_mismatch"
@@ -75,7 +75,7 @@ def test_B3_credential_for_one_payload_cannot_be_used_with_a_wider_payload(world
 def test_B3_credential_for_one_subject_cannot_act_on_another_agent(world):
     w = world
     a, b = w.factory.control.spawn("programmer", SYSTEM), w.factory.control.spawn("researcher", SYSTEM)
-    c = cred_for("set_budget", a.agent_id, 1.0)
+    c = cred_for(w, "set_budget", a.agent_id, 1.0)
     with pytest.raises(FactoryDenied) as e:
         w.factory.admin.set_budget(b.agent_id, 1.0, c)
     assert e.value.code == "scope_mismatch" and w.factory.view.agent(b.agent_id).budget == 0.0
@@ -84,7 +84,7 @@ def test_B3_credential_for_one_subject_cannot_act_on_another_agent(world):
 def test_B3_credential_cannot_be_converted_to_another_operation(world):
     w = world
     a = w.factory.control.spawn("programmer", SYSTEM)
-    c = cred_for("set_budget", a.agent_id, 1.0)
+    c = cred_for(w, "set_budget", a.agent_id, 1.0)
     for call in (lambda: w.factory.admin.stop(a.agent_id, c, "x"), lambda: w.factory.admin.archive(a.agent_id, c),
                  lambda: w.factory.admin.grant(a.agent_id, c, permissions=("read_files", "write_files")), lambda: w.factory.admin.set_policy(c, global_budget_cap=9.0)):
         with pytest.raises(FactoryDenied) as e:
@@ -108,11 +108,11 @@ def test_B3_wildcard_or_blank_scope_credentials_are_not_accepted(world):
 
 def test_B3_owner_credential_is_single_use(world):
     w = world
-    w.factory.admin.set_policy(cred_for("set_policy", global_budget_cap=5.0), global_budget_cap=5.0)
+    w.factory.admin.set_policy(cred_for(w, "set_policy", global_budget_cap=5.0), global_budget_cap=5.0)
     a = w.factory.control.spawn("programmer", SYSTEM)
-    c = cred_for("set_budget", a.agent_id, 1.0)
+    c = cred_for(w, "set_budget", a.agent_id, 1.0)
     assert w.factory.admin.set_budget(a.agent_id, 1.0, c).budget == 1.0
-    w.factory.admin.set_budget(a.agent_id, 0.0, cred_for("set_budget", a.agent_id, 0.0))
+    w.factory.admin.set_budget(a.agent_id, 0.0, cred_for(w, "set_budget", a.agent_id, 0.0))
     with pytest.raises(FactoryDenied) as e:                                           # eyni etibarnamənin təkrarı (replay)
         w.factory.admin.set_budget(a.agent_id, 1.0, c)
     assert e.value.code == "credential_replayed" and w.factory.view.agent(a.agent_id).budget == 0.0
@@ -121,13 +121,13 @@ def test_B3_owner_credential_is_single_use(world):
 def test_B3_company_rejects_wrong_operation_class_and_replay(world):
     w = world
     a = w.factory.control.spawn("programmer", SYSTEM)
-    c = owner_cred("set_budget", a.name)
+    c = owner_cred("set_budget", a.name, company=company_scope("set_budget", a.name, 1.0))
     with pytest.raises(CompanyDenied) as e:                                           # set_budget etibarnaməsi şirkətdə dayandırma üçün istifadə olunmur
         w.company.admin.suspend(a.name, c)
     assert e.value.code == "scope_mismatch"
     w.company.admin.set_budget(a.name, 1.0, c)
     with pytest.raises(CompanyDenied) as e2:
-        w.company.admin.set_budget(a.name, 2.0, c)
+        w.company.admin.set_budget(a.name, 1.0, c)
     assert e2.value.code == "credential_replayed"
     assert w.company.view.get(a.name).budget == 1.0
 
@@ -158,6 +158,76 @@ def test_B3_a_step_up_for_a_generic_hash_cannot_authorise_a_real_payload(tmp_pat
     assert e.value.code == "scope_mismatch"
 
 
+# ---- Company birbaşa yoxlayır (CompanyAdmin yan keçid): fabrikə güvənmədən dəqiq əməliyyat + hədəf + kanonik parametr hash-i
+
+def _auth(perms=("read_files",), sens=False, deleg=(), cap=0.0):
+    from agents.company import Authority
+    return Authority(frozenset(perms), sens, frozenset(deleg), cap)
+
+
+def _spec(name="cmp_agent"):
+    return AgentSpec(name=name, purpose="p", tools=[], permissions=["read_files", "write_files"], inputs=["sorgu"], outputs=["netice"], cost_limit=5.0)
+
+
+def _company_cases(w, victim, other):
+    """op -> (scope_op, doğru arqumentlər, FƏRQLİ arqumentlər, çağırış). Bütün arqumentlər `principal`-sız."""
+    adm = w.company.admin
+    return {
+        "set_budget": ("set_budget", (victim.name, 1.0), (victim.name, 2.0), lambda a, c: adm.set_budget(*a, c)),
+        "suspend": ("stop", (victim.name,), (other.name,), lambda a, c: adm.suspend(*a, c)),
+        "retire": ("archive", (victim.name,), (other.name,), lambda a, c: adm.retire(*a, c)),
+        "set_authority": ("grant", (victim.name, _auth()), (victim.name, _auth(("read_files", "write_files"))), lambda a, c: adm.set_authority(*a, c)),
+        "set_department_cost": ("set_department_cost", ("development", 1.0), ("development", 9.0), lambda a, c: adm.set_department_cost(*a, c)),
+        "register_baseline_agent": ("spawn", (_spec(), "development", "Rol"), (_spec(), "finance", "Rol"), lambda a, c: adm.register_baseline_agent(*a, c)),
+        "register_agent": ("create_agent", (_spec(), "development", "Rol", _auth(), 1.0), (_spec(), "development", "Rol", _auth(("read_files", "write_files")), 1.0),
+                           lambda a, c: adm.register_agent(*a, c)),
+    }
+
+
+@pytest.mark.parametrize("op", ["set_budget", "suspend", "retire", "set_authority", "set_department_cost", "register_baseline_agent", "register_agent"])
+def test_B3_company_independently_rejects_a_credential_for_a_different_exact_effect(world, op):
+    w = world
+    victim, other = w.factory.control.spawn("programmer", SYSTEM), w.factory.control.spawn("researcher", SYSTEM)
+    scope_op, good, bad, call = _company_cases(w, victim, other)[op]
+    before = (w.company.view.get(victim.name), w.company.view.get(other.name))
+    wrong = owner_cred(scope_op, "x", company=company_scope(op, *bad))                  # düzgün sinif, düzgün imza, amma BAŞQA təsir
+    with pytest.raises(CompanyDenied) as e:
+        call(good, wrong)
+    assert e.value.code == "scope_mismatch"
+    blank = owner_cred(scope_op, "x")                                                    # şirkət təsiri yoxdur (köhnə üslub fabrik etibarnaməsi)
+    with pytest.raises(CompanyDenied) as e2:
+        call(good, blank)
+    assert e2.value.code == "scope_mismatch"
+    assert (w.company.view.get(victim.name), w.company.view.get(other.name)) == before
+    right = owner_cred(scope_op, "x", company=company_scope(op, *good))
+    call(good, right)                                                                    # dəqiq təsir qəbul olunur
+    with pytest.raises(CompanyDenied) as e3:
+        call(good, right)
+    assert e3.value.code == "credential_replayed"
+
+
+def test_B3_a_factory_credential_cannot_drive_company_directly_with_a_wider_effect(world):
+    w = world
+    c = cred_for(w, "create_agent", "programmer")                                        # sahib: məhdud 'programmer' yaradılışını təsdiqlədi
+    with pytest.raises(CompanyDenied) as e:                                              # Company-yə birbaşa daha geniş icazə/büdcə ilə registrasiya
+        w.company.admin.register_agent(_spec("sneaky_agent"), "development", "Proqramçı", _auth(("read_files", "write_files", "publish"), True), 5.0, c)
+    assert e.value.code == "scope_mismatch"
+    assert w.company.view.get("sneaky_agent") is None
+
+
+def test_B3_a_credential_consumed_directly_at_company_cannot_also_create_the_factory_agent(world):
+    from agents.agent_roles import ROLE_CATALOG
+    w = world
+    name, subject, digest, company = w.factory.admin.scope("create_agent", "programmer")
+    c = owner_cred(name, subject, digest, company=company)
+    role = ROLE_CATALOG["programmer"]
+    spec = w.factory._core.spec_for(role, "direct_agent_1")
+    w.company.admin.register_agent(spec, role.department, role.title_az, _auth(), 0.0, c)   # etibarnamə şirkətdə xərclənib (dəqiq eyni təsir)
+    with pytest.raises(FactoryDenied) as e:
+        w.factory.admin.create_agent("programmer", c)
+    assert e.value.code == "credential_replayed" and w.factory.view.agents() == []
+
+
 # ============================================================================ B-4: cihaz ləğvi verilmiş etibarnamələri DƏRHAL ləğv edir
 
 def _prod(tmp_path):
@@ -181,9 +251,8 @@ def test_B4_revoking_the_device_invalidates_an_outstanding_owner_credential_imme
 def test_B4_revoked_device_credential_is_also_refused_by_company(tmp_path):
     p = _prod(tmp_path)
     a = p.stack.console.create_agent("programmer", owner_for(p, "create_agent", "programmer"))
-    c = owner_cred("set_budget", a.name, owner_id="owner")                               # eyni sahib, amma cihaz kanalı fabrikdəki kimi
-    _, subject, digest = p.stack.console.scope("set_budget", a.agent_id, 1.0)
-    c = authenticate(p, "set_budget", subject, digest)
+    _, subject, digest, company = p.stack.console.scope("set_budget", a.agent_id, 1.0)
+    c = authenticate(p, "set_budget", subject, digest, company=company)
     p.auth.revoke_device(p.dev.device_id)
     with pytest.raises(CompanyDenied) as e:
         p.svc.company.admin.set_budget(a.name, 1.0, c)
@@ -193,7 +262,8 @@ def test_B4_revoked_device_credential_is_also_refused_by_company(tmp_path):
 def test_B4_revocation_is_precise_other_devices_keep_working(tmp_path):
     p = _prod(tmp_path)
     other = pair(p.auth)
-    keep = authenticate(p, *("create_agent",) + p.stack.console.scope("create_agent", "researcher")[1:], dev=other)
+    _, subj, digest, company = p.stack.console.scope("create_agent", "researcher")
+    keep = authenticate(p, "create_agent", subj, digest, dev=other, company=company)
     p.auth.revoke_device(p.dev.device_id)
     assert p.stack.console.create_agent("researcher", keep).status == "active"
 
@@ -546,9 +616,9 @@ def test_A8_system_chat_goes_through_the_broker_and_respects_stop(tmp_path):
 
 def test_A8_prefetch_never_uses_the_paid_engine(world):
     w = world
-    w.factory.admin.set_policy(cred_for("set_policy", global_budget_cap=5.0), global_budget_cap=5.0)
-    a = w.factory.admin.create_agent("programmer", cred_for("create_agent", "programmer"))
-    w.factory.admin.set_budget(a.agent_id, 1.0, cred_for("set_budget", a.agent_id, 1.0))
+    w.factory.admin.set_policy(cred_for(w, "set_policy", global_budget_cap=5.0), global_budget_cap=5.0)
+    a = w.factory.admin.create_agent("programmer", cred_for(w, "create_agent", "programmer"))
+    w.factory.admin.set_budget(a.agent_id, 1.0, cred_for(w, "set_budget", a.agent_id, 1.0))
     t = w.factory.control.assign(a.agent_id, "iş", "funksiya yaz", SYSTEM)
     seen = []
     real_route = w.router.route

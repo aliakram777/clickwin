@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import math
 import re
@@ -44,6 +45,7 @@ DEFAULT_DISPATCHER_TTL = 120.0
 DEFAULT_AUTH_TTL = 60.0
 _ID_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,80}$")
 _KEY_ID_RE = re.compile(r"^[A-Za-z0-9_.\-]{3,40}$")
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _B64_32 = re.compile(r"^[A-Za-z0-9_\-]{43}=?$")
 
 
@@ -68,7 +70,16 @@ class SignedPrincipal(Principal):
     scope_op: str = ""
     scope_subject: str = ""
     scope_hash: str = ""
+    # Şirkət (Company) tərəfinin MÜSTƏQİL yoxlayacağı dəqiq təsir: `company_scope(op, ...)` hash-i (əməliyyat + hədəf + kanonik parametrlər). Şirkət təsiri olmayan əməliyyatlarda boşdur.
+    scope_company: str = ""
     signature: str = field(default="", repr=False, compare=False)
+
+
+def scope_digest(scope_hash: str, scope_company: str) -> str:
+    """Cihazın imzaladığı yeganə parametr hash-i: fabrik əhatəsi + şirkət təsiri (şirkət təsiri yoxdursa yalnız fabrik hash-i)."""
+    if not scope_company:
+        return scope_hash
+    return hashlib.sha256(f"naymera-scope-v2|{scope_hash}|{scope_company}".encode("ascii", "replace")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -92,8 +103,8 @@ def _num(v: Any) -> bool:
 
 
 def _principal_bytes(p: Any) -> bytes:
-    fields = [p.id, p.kind, p.channel, p.role, p.key_id, p.issued_at, p.expires_at, p.nonce, p.scope_op, p.scope_subject, p.scope_hash]
-    return b"naymera-principal-v3\x1f" + json.dumps(fields, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    fields = [p.id, p.kind, p.channel, p.role, p.key_id, p.issued_at, p.expires_at, p.nonce, p.scope_op, p.scope_subject, p.scope_hash, p.scope_company]
+    return b"naymera-principal-v4\x1f" + json.dumps(fields, ensure_ascii=True, separators=(",", ":")).encode("ascii")
 
 
 def _authorization_bytes(a: Any) -> bytes:
@@ -301,9 +312,11 @@ class Keyring:
         except (TypeError, ValueError):
             raise CredentialError("etibarnamə yanlış formatdadır", "forged_principal") from None
         self._check(payload, principal.signature, principal.key_id, principal.nonce, principal.issued_at, principal.expires_at, MAX_PRINCIPAL_TTL)
-        scoped = (principal.scope_op, principal.scope_subject, principal.scope_hash)
+        scoped = (principal.scope_op, principal.scope_subject, principal.scope_hash, principal.scope_company)
         if not all(isinstance(x, str) for x in scoped):
             raise CredentialError("əhatə yanlış formatdadır", "forged_principal")
+        if principal.scope_company and not _HEX64.match(principal.scope_company):
+            raise CredentialError("şirkət əhatəsi yanlış formatdadır", "forged_principal")
         if principal.role in ("owner", "mock_owner"):
             if not principal.scope_op or not principal.scope_hash:
                 raise CredentialError("sahib etibarnaməsi konkret əməliyyata bağlı olmalıdır (scope)", "scope_missing")
@@ -395,15 +408,23 @@ class OwnerIssuer:
                  ttl: float = DEFAULT_OWNER_TTL, action_prefix: str = "factory:") -> None:
         ttl = _ttl(ttl, MAX_PRINCIPAL_TTL)
 
-        def from_step_up(receipt: Any) -> SignedPrincipal:
+        def from_step_up(receipt: Any, scope_hash: str = "", scope_company: str = "") -> SignedPrincipal:
             verified = consume(receipt) if receipt is not None else None
             if not verified or len(verified) != 5 or not all(isinstance(x, str) for x in verified) or not (verified[0] and verified[1] and verified[2] and verified[4]):
                 raise CredentialError("yoxlanmış step-up sübutu tələb olunur", "proof_required")
             owner_id, device_id, action, subject, payload_hash = verified
             if not action.startswith(action_prefix) or len(action) == len(action_prefix):
                 raise CredentialError("step-up əməliyyatı bu etibarnamə üçün uyğun deyil", "proof_required")
-            # etibarnamə YALNIZ bu step-up-ın bağlandığı əməliyyat/hədəf/parametr hash-ına verilir (B-3)
-            return mint(owner_id, "human", f"stepup:{device_id}", ttl, (action[len(action_prefix):], subject, payload_hash))
+            # etibarnamə YALNIZ bu step-up-ın bağlandığı əməliyyat/hədəf/parametr hash-ına verilir (B-3); şirkət təsiri varsa cihazın imzaladığı hash kompozitdir
+            if scope_company:
+                if not isinstance(scope_hash, str) or not scope_hash or not _HEX64.match(scope_company) or scope_digest(scope_hash, scope_company) != payload_hash:
+                    raise CredentialError("step-up sübutu bu fabrik/şirkət əhatəsinə bağlı deyil", "proof_required")
+                fscope = scope_hash
+            else:
+                if scope_hash and scope_hash != payload_hash:
+                    raise CredentialError("step-up sübutu bu əhatəyə bağlı deyil", "proof_required")
+                fscope = payload_hash
+            return mint(owner_id, "human", f"stepup:{device_id}", ttl, (action[len(action_prefix):], subject, fscope, scope_company))
 
         object.__setattr__(self, "from_step_up", from_step_up)
 
@@ -442,11 +463,12 @@ class TrustedSigner:
             if role not in ROLES:
                 raise CredentialError("naməlum rol", "bad_key")
 
-            def mint(pid: str, kind: str, channel: str, ttl: float, scope: tuple[str, str, str] = ("", "", "")) -> SignedPrincipal:
+            def mint(pid: str, kind: str, channel: str, ttl: float, scope: tuple = ("", "", "")) -> SignedPrincipal:
                 now = float(clock())
-                op, subject, digest = scope
-                draft = SignedPrincipal(pid, kind, channel, role, key_id, now, now + _ttl(ttl, MAX_PRINCIPAL_TTL), secrets.token_hex(12), op, subject, digest, "")
-                return SignedPrincipal(pid, kind, channel, role, key_id, draft.issued_at, draft.expires_at, draft.nonce, op, subject, digest, sign(_principal_bytes(draft)))
+                op, subject, digest = scope[:3]
+                company = scope[3] if len(scope) > 3 else ""
+                draft = SignedPrincipal(pid, kind, channel, role, key_id, now, now + _ttl(ttl, MAX_PRINCIPAL_TTL), secrets.token_hex(12), op, subject, digest, company, "")
+                return SignedPrincipal(pid, kind, channel, role, key_id, draft.issued_at, draft.expires_at, draft.nonce, op, subject, digest, company, sign(_principal_bytes(draft)))
             return mint
 
         def sign_auth(task_id: str, agent_id: str, run_op: str, op_id: str, attempt: int, action: str, ttl: float) -> DispatchAuthorization:

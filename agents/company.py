@@ -105,6 +105,54 @@ class HandoffResult:
     code: str = ""
 
 
+def _canon_num(v: Any) -> Any:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else repr(v)
+
+
+def _canon_authority(a: Any) -> dict:
+    try:
+        return {"permissions": sorted(str(x) for x in a.permissions), "sensitive_ok": bool(a.sensitive_ok), "delegate_to": sorted(str(x) for x in a.delegate_to),
+                "max_task_cost": _canon_num(a.max_task_cost)}
+    except Exception:  # noqa: BLE001 — yanlış tipli giriş: heç bir etibarnamənin əhatəsinə uyğun gəlməyən sabit dəyər
+        return {"invalid_authority": True}
+
+
+def _canon_spec(spec: Any) -> dict:
+    """Agent adı (sistem tərəfindən yaradılan təsadüfi sonluq) daxil DEYİL: sahib onu əvvəlcədən bilə bilməz; qalan hər şey kanonik hash-dədir."""
+    try:
+        return {"purpose": str(spec.purpose), "tools": [str(x) for x in spec.tools], "permissions": sorted(str(x) for x in spec.permissions),
+                "inputs": [str(x) for x in spec.inputs], "outputs": [str(x) for x in spec.outputs], "cost_limit": _canon_num(spec.cost_limit)}
+    except Exception:  # noqa: BLE001
+        return {"invalid_spec": True}
+
+
+def company_scope(op: str, *args: Any) -> str:
+    """Şirkət əməliyyatının DƏQİQ kanonik hash-i: SHA-256({op, subject, params}). Sahibin step-up ilə imzaladığı `scope_company` bununla müqayisə olunur (B-3).
+    Argumentlər `CompanyAdmin` metoduna verilənlərlə eynidir (`principal` olmadan)."""
+    if op == "register_agent":
+        spec, department, role, authority, budget = args
+        subject, params = str(department), {"role": _clean_role(role), "authority": _canon_authority(authority), "budget": _canon_num(budget), "spec": _canon_spec(spec)}
+    elif op == "register_baseline_agent":
+        spec, department, role = args
+        subject, params = str(department), {"role": _clean_role(role), "spec": _canon_spec(spec)}
+    elif op in ("suspend", "resume", "retire"):
+        (name,) = args
+        subject, params = str(name), {}
+    elif op == "set_authority":
+        name, authority = args
+        subject, params = str(name), {"authority": _canon_authority(authority)}
+    elif op == "set_budget":
+        name, budget = args
+        subject, params = str(name), {"budget": _canon_num(budget)}
+    elif op == "set_department_cost":
+        department, cost = args
+        subject, params = str(department), {"cost": _canon_num(cost)}
+    else:
+        raise ValueError(f"naməlum şirkət əməliyyatı: {str(op)[:30]}")
+    body = json.dumps({"op": op, "subject": subject, "params": params}, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False, default=str)
+    return hashlib.sha256(body.encode("ascii")).hexdigest()
+
+
 def _clean_role(role: Any) -> str:
     return " ".join(str(role).split())[:120] if isinstance(role, str) else ""
 
@@ -162,7 +210,7 @@ class _Core:
         except CredentialError as exc:
             raise self.reject(op, exc.code, str(exc), principal) from None
 
-    def authorize(self, principal: Principal, op: str, expansion: bool) -> None:
+    def authorize(self, principal: Principal, op: str, expansion: bool, scope: str = "") -> None:
         """Hər imtiyazlı əməliyyat üçün Company şəxsiyyəti MÜSTƏQİL yoxlayır: yalnız etibarlı açarla imzalanmış, vaxtı keçməmiş, ləğv olunmamış
         `owner`/`system`/`mock_owner` etibarnaməsi qəbul olunur. Özü yaradılmış `Principal` heç vaxt səlahiyyət vermir; yoxlayıcı yoxdursa əməliyyat bağlıdır."""
         self.identify(principal, op)
@@ -177,6 +225,8 @@ class _Core:
             raise self.reject(op, "unauthorized", "əməliyyatı edən sahib siyahısında deyil", principal)
         if getattr(principal, "scope_op", "") not in COMPANY_OP_SCOPES.get(op, frozenset()):
             raise self.reject(op, "scope_mismatch", "sahib etibarnaməsinin əhatəsi bu əməliyyata uyğun deyil", principal)
+        if not scope or getattr(principal, "scope_company", "") != scope:        # Company MÜSTƏQİL yoxlayır: əməliyyat + hədəf + kanonik parametr hash-i (fabrikin yoxlamasına güvənmir)
+            raise self.reject(op, "scope_mismatch", "sahib etibarnaməsi bu dəqiq şirkət əməliyyatına/hədəfinə/parametrlərinə bağlı deyil", principal)
         try:                        # bir-dəfəlik: eyni sahib etibarnaməsi ikinci Company əməliyyatını təsdiqləyə bilmir
             self.conn.execute("INSERT INTO company_used_credentials (nonce, op, used_at) VALUES (?, ?, ?)",
                               (principal.nonce, op, float(self.clock())))  # type: ignore[attr-defined]
@@ -316,7 +366,7 @@ class CompanyAdmin:
                        principal: Principal) -> CompanyAgent:
         c = self._core
         op = "register_agent"
-        c.authorize(principal, op, expansion=True)
+        c.authorize(principal, op, expansion=True, scope=company_scope(op, spec, department, role, authority, budget))
         if department not in DEPARTMENTS:
             raise c.reject(op, "unknown_department", f"naməlum şöbə: {department}", principal)
         role = _clean_role(role)
@@ -348,7 +398,7 @@ class CompanyAdmin:
         çağıra bilər; agent çağıra bilməz. Genişləndirmə yalnız sahib tərəfindən (`set_authority`/`set_budget`)."""
         c = self._core
         op = "register_baseline_agent"
-        c.authorize(principal, op, expansion=False)
+        c.authorize(principal, op, expansion=False, scope=company_scope(op, spec, department, role))
         if department not in DEPARTMENTS:
             raise c.reject(op, "unknown_department", f"naməlum şöbə: {department}", principal)
         role = _clean_role(role)
@@ -382,7 +432,7 @@ class CompanyAdmin:
         row = c._row(name)
         if row is None:
             raise c.reject(op, "unknown_agent", "agent tapılmadı", principal)
-        c.authorize(principal, op, expansion=False)
+        c.authorize(principal, op, expansion=False, scope=company_scope(op, name))
         agent = c._agent(row)
         if agent.status != "active":
             raise c.reject(op, "not_active", "yalnız aktiv agent dayandırıla bilər", principal)
@@ -401,7 +451,7 @@ class CompanyAdmin:
         row = c._row(name)
         if row is None:
             raise c.reject(op, "unknown_agent", "agent tapılmadı", principal)
-        c.authorize(principal, op, expansion=False)
+        c.authorize(principal, op, expansion=False, scope=company_scope(op, name))
         agent = c._agent(row)
         if agent.status not in ("suspended_system", "suspended_owner"):
             raise c.reject(op, "not_suspended", "agent dayandırılmayıb (və ya fəaliyyətdən çıxarılıb)", principal)
@@ -421,7 +471,7 @@ class CompanyAdmin:
         if row is None:
             raise c.reject(op, "unknown_agent", "agent tapılmadı", principal)
         agent = c._agent(row)
-        c.authorize(principal, op, expansion=c.expands(agent.authority, authority))
+        c.authorize(principal, op, expansion=c.expands(agent.authority, authority), scope=company_scope(op, name, authority))
         if agent.status != "active":
             raise c.reject(op, "agent_retired", "fəaliyyətdən çıxarılmış agentin səlahiyyəti dəyişdirilmir", principal)
         c.validate(op, agent.spec, authority, agent.budget)
@@ -444,7 +494,7 @@ class CompanyAdmin:
         if row is None:
             raise c.reject(op, "unknown_agent", "agent tapılmadı", principal)
         agent = c._agent(row)
-        c.authorize(principal, op, expansion=_valid_money(budget) and budget > agent.budget)
+        c.authorize(principal, op, expansion=_valid_money(budget) and budget > agent.budget, scope=company_scope(op, name, budget))
         if agent.status != "active":
             raise c.reject(op, "agent_retired", "fəaliyyətdən çıxarılmış agentin büdcəsi dəyişdirilmir", principal)
         c.validate(op, agent.spec, agent.authority, budget)
@@ -462,7 +512,7 @@ class CompanyAdmin:
         row = c._row(name)
         if row is None:
             raise c.reject(op, "unknown_agent", "agent tapılmadı", principal)
-        c.authorize(principal, op, expansion=False)  # azaltma: sahib və ya sistem
+        c.authorize(principal, op, expansion=False, scope=company_scope(op, name))  # azaltma: sahib və ya sistem
         agent = c._agent(row)
         c.registry.update(c.effective(agent.spec, agent.authority, agent.budget, retired=True))
         c.conn.execute("UPDATE company_agents SET status = 'retired', updated_at = ? WHERE name = ?", (c.now(), name))
@@ -473,7 +523,7 @@ class CompanyAdmin:
     def set_department_cost(self, department: str, cost: float, principal: Principal) -> None:
         c = self._core
         op = "set_department_cost"
-        c.authorize(principal, op, expansion=True)  # planlaşdırma xərc cədvəli: yalnız sahib
+        c.authorize(principal, op, expansion=True, scope=company_scope(op, department, cost))  # planlaşdırma xərc cədvəli: yalnız sahib
         if department not in DEPARTMENTS:
             raise c.reject(op, "unknown_department", f"naməlum şöbə: {department}", principal)
         if not _valid_money(cost):

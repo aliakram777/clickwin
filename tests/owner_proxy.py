@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 from agents.agent_factory import AgentFactory
-from agents.company import COMPANY_OP_SCOPES, Company
+from agents.company import COMPANY_OP_SCOPES, Company, company_scope
 from tests.factory_keys import HASH0, OwnerSentinel
 
 _ALIASES = {"assign": "assign_task"}
@@ -34,9 +34,10 @@ class _ScopedFacet:
             if self._company:
                 allowed = sorted(COMPANY_OP_SCOPES.get(name, {"?"}))
                 op, subject, digest = allowed[0], (str(rest_a[0]) if rest_a and isinstance(rest_a[0], str) else ""), HASH0
+                company = company_scope(name, *rest_a)
             else:
-                op, subject, digest = self._real.scope(_ALIASES.get(name, name), *rest_a, **rest_k)
-            cred = sentinel.mint(op, subject, digest)
+                op, subject, digest, company = self._real.scope(_ALIASES.get(name, name), *rest_a, **rest_k)
+            cred = sentinel.mint(op, subject, digest, company)
             args = [cred if isinstance(x, OwnerSentinel) else x for x in args]
             kws = {k: (cred if isinstance(v, OwnerSentinel) else v) for k, v in kws.items()}
             return attr(*args, **kws)
