@@ -7,6 +7,7 @@ from agents.orchestrator import ExecutionError, Orchestrator, TransientError
 from agents.registry import Registry
 from agents.spec import AgentSpec
 from agents.workflow import PlanStep
+from tests.ledger_helpers import owned_ledger, owner_resolve
 from safety.ledger import BudgetPolicy, CostLedger, reconcile
 
 
@@ -36,7 +37,7 @@ def env(tmp_path):
     reg = Registry(":memory:")
     for x in "abcd":
         reg.add(spec(f"agent_{x}"), f"dept_{x}")
-    ledger = CostLedger(tmp_path / "ledger.db")
+    ledger = owned_ledger(tmp_path / "ledger.db")
     paths = dict(audit_path=tmp_path / "audit.jsonl", stop_path=tmp_path / "STOP",
                  errors_path=tmp_path / "errors.jsonl")
 
@@ -208,7 +209,8 @@ def test_manual_reconciliation_clears_unknown(env):
     ceo, _ = make(Script({"agent_a": [TransientError("naməlum")]}))
     ceo.run_workflow("g", [st("a")], job_id="j1")
     assert ledger.unknown_entries()
-    ledger.commit("j1:a:a0", 0.3)  # əl ilə uzlaşdırma
+    assert ledger.commit("j1:a:a0", 0.3) is False
+    assert owner_resolve(ledger, "j1:a:a0", 0.3)  # sahib təsdiqi ilə uzlaşdırma
     assert ledger.unknown_entries() == [] and ledger.total() == pytest.approx(0.3)
 
 

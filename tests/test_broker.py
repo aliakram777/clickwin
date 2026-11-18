@@ -10,6 +10,7 @@ from agents.spec import AgentSpec
 from safety.broker import (
     BrokerRequired, Effect, EffectBroker, ExecutionError, TransientError, broker_only,
 )
+from tests.ledger_helpers import owned_ledger, owner_resolve
 from safety.ledger import BudgetPolicy, CostLedger, reconcile
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -40,7 +41,7 @@ class Exec:
 
 @pytest.fixture
 def env(tmp_path):
-    ledger = CostLedger(tmp_path / "ledger.db")
+    ledger = owned_ledger(tmp_path / "ledger.db")
     audit, stop = tmp_path / "audit.jsonl", tmp_path / "STOP"
 
     def make(policy=None, approver=None, actual_cost=None, use_ledger=True, audit_path=None):
@@ -254,7 +255,9 @@ def test_unknown_cost_is_kept_flagged_and_never_auto_released(env):
     assert make().run(fx(), Exec()).status == "duplicate"  # təkrar icra və ikiqat hesab yoxdur
     assert ledger.total() == pytest.approx(0.5)
     assert reconcile(ledger, audit).ok
-    ledger.commit("op1", 0.2)  # yalnız əl ilə uzlaşdırma
+    assert ledger.commit("op1", 0.2) is False and ledger.release("op1") is False       # naməlum rezervi nə commit, nə release həll edir
+    assert ledger.total() == pytest.approx(0.5)
+    assert owner_resolve(ledger, "op1", 0.2) is True  # yalnız sahib təsdiqi ilə uzlaşdırma
     assert ledger.unknown_entries() == [] and ledger.total() == pytest.approx(0.2)
 
 

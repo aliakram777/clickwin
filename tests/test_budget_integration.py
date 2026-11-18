@@ -6,6 +6,7 @@ from agents.ceo import CEO, Rule, RulePlanner
 from agents.orchestrator import ExecutionError, Orchestrator, Task
 from agents.registry import Registry
 from agents.spec import AgentSpec
+from tests.ledger_helpers import owned_ledger, owner_resolve
 from safety.ledger import BudgetPolicy, CostLedger, reconcile
 
 
@@ -39,7 +40,7 @@ def env(tmp_path):
     reg = Registry(":memory:")
     reg.add(spec("tasnif_agenti", ["sual"], ["read_files", "publish"], 1.0), "destek")
     reg.add(spec("satis_agenti", ["sorgu"], ["read_files"], 5.0), "satis")
-    ledger = CostLedger(tmp_path / "ledger.db")
+    ledger = owned_ledger(tmp_path / "ledger.db")
     paths = dict(audit_path=tmp_path / "audit.jsonl", stop_path=tmp_path / "STOP",
                  errors_path=tmp_path / "errors.jsonl")
 
@@ -129,7 +130,8 @@ def test_failure_with_unknown_cost_keeps_reservation_flagged(env):
     e = entry(ledger, "a")
     assert (e.status, e.amount, e.unknown) == ("reserved", 0.5, True)
     assert orch.execute(task(0.6, "b", department="satis")).status == "blocked"  # rezerv qorunur
-    ledger.commit("a", 0.2)  # sonradan məlum oldu
+    assert ledger.commit("a", 0.2) is False   # naməlum rezervi commit həll etmir
+    assert owner_resolve(ledger, "a", 0.2)  # sonradan məlum oldu: yalnız sahib təsdiqi ilə
     healthy, _ = make(policy=BudgetPolicy(global_limit=1.0))
     assert healthy.execute(task(0.6, "b", department="satis")).status == "ok"
 
