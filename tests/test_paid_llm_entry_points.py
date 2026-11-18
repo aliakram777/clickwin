@@ -27,6 +27,8 @@ ENTRY_POINTS = {
     ("runtime/brokered_llm.py", "BrokeredRouter.route", "route"): "broker: EffectBroker.run daxilində",
     ("agents/agent_runtime.py", "AgentLLMRunner.generate", "route"): "broker: yalnız Orchestrator->Broker icra mərhələsində çağırılır; prefetch ödənişliyi istəmir",
     ("api/chat.py", "HybridReplyEngine.reply", "route"): "broker: istehsalda router BrokeredRouter-dir (aşağıdakı test)",
+    ("runtime/brokered_models.py", "BrokeredModelRunner._call", "complete"): "broker: yalnız BrokeredModelRunner._execute-dan (EffectBroker.run daxilində, in_broker yoxlanır); GuardedLLM + vahid LedgerPort",
+    ("runtime/brokered_models.py", "_TrustedProviderView.complete", "complete"): "guard: yalnız runner silahlandırdıqda; hər çağırışda reyestr reverify; GuardedLLM-in arxasında",
     ("agents/hybrid.py", "RoutedLLM.complete", "route"): "broker: istehsalda router BrokeredRouter-dir (planlaşdırıcı)",
     ("agents/hybrid.py", "CloudEngine.generate", "complete"): "guard: GuardedLLM mock olmayan provayderi Broker konteksti olmadan bloklayır",
     ("agents/llm.py", "GuardedLLM.complete.target", "complete"): "guard: bu, Broker konteksti yoxlamasından SONRA provayder çağırışıdır",
