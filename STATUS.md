@@ -1,6 +1,6 @@
 # STATUS
 
-Yenilənib: 2026-11-17
+Yenilənib: 2026-11-18
 
 ## Cari mərhələ
 Mərhələ 17 — Real AI runtime və avtonom agent fabrikası (məhdud agent yaradılışı, həyat dövrü, çoxagentli axın, məhsul bünövrəsi; real provayder/alət YOXDUR; APK build EDİLMƏYİB, PR təsdiq gözləyir). Əvvəlki: Mərhələ 16 — Daimi hibrid AI beyni (Cloud + Local; real provayder/model/səs YOXDUR). Əvvəlki: Mərhələ 15 — Android build hazırlığı və audit (APK build EDİLMƏYİB: `dl.google.com` bloklu; Android-dan asılı olmayan Kotlin qatı JVM-də kompilyasiya və həqiqi backend ilə sınanıb; PR təsdiq gözləyir). Əvvəlki PR-lər: #1–#16 (PR #16 CI uğurlu, birləşdirilməyib). Yol xəritəsi: [ROADMAP.md](ROADMAP.md).
@@ -101,6 +101,8 @@ Mərhələ 17 — Real AI runtime və avtonom agent fabrikası (məhdud agent ya
 - Mərhələ 17 / agent izolyasiyası (PR #20, audit B-1/B-2) — agent kodu AYRI OS prosesində (`runtime/agent_gateway.py` AgentGateway, `runtime/agent_worker.py`, `runtime/agent_wire.py`): minimal HMAC-autentifikasiyalı RPC (`hello/info/request_permission/handoff`), agent id sessiyaya server tərəfindən bağlanır, root-da uid endirmə (server `/proc` ilə müstəqil yoxlayır) + şəbəkə namespace cəhdi + NO_NEW_PRIVS/DUMPABLE/rlimit, root olmayanda sessiya QAPALI qalır (defolt); `Keyring` yalnız yoxlama + control-plane dondurulması; `FactoryStack`-dən `agent_handle`/`admin` silindi (`OwnerConsole` sarğı funksiyalar). Testlər: `tests/test_agent_isolation.py` (real işçi proseslər, istehsal bootstrap-ı; E1a–E1e, E2). Bu TAM OS SANDBOX DEYİL (seccomp/mount/pid namespace/cgroup yoxdur); B-3..B-6, A-7, A-8 açıqdır; APK build edilməyib.
 
 - Mərhələ 17 / izolyasiya sərtləşdirməsi (PR #21, audit H-1..H-4, M-1..M-4) — JSON iç-içəlik/ölçü limiti ayrışdırmadan əvvəl, qeyri-bloklayıcı I/O (`selectors`, limitli yazma buferi, ödəniş müddəti hər pump-da, bloklamayan təmizlik), sessiya başına unikal uid/gid + uid-əsaslı proses ağacı təmizliyi (fork/setsid qaçışı), RLIMIT_NPROC, seccomp (x86_64), şəbəkə namespace-i MƏCBURİ və serverin `/proc` ilə yoxladığı izolyasiya xassələri (işçi bayraqlarına etibar yox), `OwnerConsole` fabrikə istinadsız, same-uid rejimi açıq `allow_insecure_same_uid` və `security_boundary=False`. Testlər: `tests/test_agent_isolation_hardening.py`. Tam OS sandbox DEYİL; root olmayan CI-da root-xüsusi testlər atlanır; B-3..B-6, A-7, A-8 açıqdır; APK build edilməyib.
+
+- Mərhələ 17 / qalan audit tapıntıları (PR #22, B-3..B-6, A-7, A-8) — sahib etibarnaməsi bir dəqiq `(əməliyyat, hədəf, parametr-hash)`-ə bağlı və bir-dəfəlikdir; cihaz ləğvi verilmiş etibarnamələri dərhal ləğv edir; `LockedConnection` (iplik-təhlükəsiz SQLite, idempotent close); daha güclü açar yoxlaması + `tools/gen_signing_key.py` + `NAYMERA_SIGNING_KEY_FILE`; Ledger rezerv yarışı/sızma/naməlum rezerv (`expire_stale`, `resolve_unknown`); ödənişli LLM yalnız Broker kontekstində (`BrokeredRouter`, `safety/execution_context.py`). Testlər: `tests/test_remaining_hardening.py` (43 test; PR #21 kodunda 31-i uğursuz olur). Qalan risklər: AGENT_FACTORY.md «Bu işdən sonra qalan risklər». APK build edilməyib; real provayder/cihaz ilə sınaq yoxdur.
 
 ## Növbəti addımlar (təsdiq gözləyir)
 - LLM əsaslı Planner (interfeys hazırdır, real API təsdiq tələb edir)

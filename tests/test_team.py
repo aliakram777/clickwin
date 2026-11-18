@@ -10,6 +10,7 @@ import pytest
 from agents.agent_roles import ROLE_CATALOG
 from agents.hybrid import EngineUnavailable, HealthTracker
 from agents.team import Stage, TeamDenied, TeamPlan, TeamPlanner, TeamRunner
+from tests.factory_keys import OWNER_APPROVER
 from tests.test_agent_runtime import OWNER, SYSTEM, publisher, rows, world  # noqa: F401  (fixture)
 from tests.test_hybrid_router import Fake
 
@@ -232,7 +233,7 @@ def test_publish_stage_needs_an_owner_created_agent_and_waits_for_approval(team)
     calls = w2.cloud.calls
     rep3 = w2.team.run(plan2)                                                                              # təsdiq yoxdur: dəyişiklik yoxdur
     assert rep3.status == "awaiting_approval" and w2.cloud.calls == calls
-    assert w2.approvals.gateway.approve(st["pub"].approval_id, OWNER, "ok").ok
+    assert w2.approvals.gateway.approve(st["pub"].approval_id, OWNER_APPROVER, "ok").ok
     rep4 = w2.team.run(plan2)
     assert rep4.status == "ok" and {s.stage_id: s.status for s in rep4.stages} == {"pm": "done", "pub": "done", "fin": "done"}
     assert w2.team.run(plan2) == rep4 and pubber.agent_id == {s.stage_id: s for s in rep4.stages}["pub"].agent_id

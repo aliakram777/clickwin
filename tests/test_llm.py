@@ -13,6 +13,7 @@ from agents.llm import (
     LLMError, LLMProviderError, LLMRequest, LLMResponse, LLMTimeout, LLMTooLarge, LLMUnavailable,
     MockProvider, ProviderRegistry, Secret, create_provider, estimate_tokens, load_config, redact,
 )
+from safety.execution_context import broker_context
 from safety.ledger import CostLedger
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -236,7 +237,7 @@ def test_timeout_is_enforced_and_logged(make):
 def test_provider_errors_are_wrapped_and_redacted(make):
     boom = RuntimeError(f"401 Unauthorized for key {FAKE_KEY} Authorization: Bearer abcdef1234567890")
     client, log = make(_RawRaising(boom), cfg(api_key=Secret(FAKE_KEY)))
-    with pytest.raises(LLMProviderError) as exc:
+    with broker_context(), pytest.raises(LLMProviderError) as exc:      # real (mock olmayan) provayder yalnız Broker daxilində çağırılır (A-8)
         client.complete("p")
     assert FAKE_KEY not in str(exc.value) and "abcdef1234567890" not in str(exc.value)
     assert exc.value.__cause__ is None and exc.value.__suppress_context__ is True

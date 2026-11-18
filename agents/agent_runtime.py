@@ -47,7 +47,7 @@ class AgentLLMRunner:
         self.factory, self.router, self.memory, self.allow_simulated = factory, router, memory, allow_simulated
         self.global_limit = global_limit   # Ledger ümumi limiti (Orkestratorun siyasətindən); None: yalnız agent limiti
 
-    def generate(self, agent: AgentRecord, task: TaskRecord, prompt: str | None = None) -> RouteResult:
+    def generate(self, agent: AgentRecord, task: TaskRecord, prompt: str | None = None, *, prefetch: bool = False) -> RouteResult:
         """`prompt` verilibsə (təsdiqlənmiş giriş) YALNIZ o istifadə olunur. Həssas icazəli tapşırıqda yaddaş konteksti əlavə edilmir ki,
         təsdiq olunan mətn ilə model-ə gedən mətn eyni olsun (F-2).
         Ödənişli Cloud: agent büdcəsi 0 isə mühərrik heç yoxlanmır; əks halda xərc Ledger-də agentin adına rezerv edilir (F-3)."""
@@ -63,7 +63,7 @@ class AgentLLMRunner:
         scope = SpendScope(agent.name, request_id, max(0.0, budget), self.global_limit() if self.global_limit is not None else None)
         with spend_scope(scope):
             return self.router.route(request_id, "chat", text, agent.system_instruction, context, allow_mock=self.allow_simulated,
-                                     allow_paid=budget > 0.0)
+                                     allow_paid=budget > 0.0 and not prefetch)      # A-8: ödənişli çağırış YALNIZ Broker/Gate/Ledger yolunda (prefetch bunu keçə bilməz)
 
     def __call__(self, spec: Any, data: dict) -> dict:
         agent = self.factory.view.find(spec.name)
@@ -127,7 +127,7 @@ class AgentDispatcher:
 
     def _safe_generate(self, agent: AgentRecord, task: TaskRecord) -> None:
         try:
-            self.runner.generate(agent, task)
+            self.runner.generate(agent, task, prefetch=True)
         except Exception:  # noqa: BLE001 — generasiya uğursuzluğu icra mərhələsində yenidən yoxlanılır və hesabata düşür
             return
 

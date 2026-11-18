@@ -23,6 +23,7 @@ from typing import Any, Callable, Iterator, Sequence
 
 from agents.ceo import CEO, JobReport, ResumeState, StepReport
 from agents.workflow import PlanError, PlanStep, execution_order
+from safety.dbconn import connect
 
 DEFAULT_DB = Path("data/workflows.db")
 JOB_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
@@ -114,7 +115,7 @@ class WorkflowStore:
         self.lease_s = float(lease_s)
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=30)
+        self._conn = connect(str(db_path), isolation_level=None, timeout=30)
         self._conn.row_factory = sqlite3.Row
         for stmt in _SCHEMA:
             self._conn.execute(stmt)

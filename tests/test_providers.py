@@ -1,5 +1,6 @@
 """Real AI runtime: OpenAI-uyğun provayder adapteri (nəqliyyat inyeksiya olunur), endpoint siyasəti, env-dən qoşulma, budjet qapısı.
 Testlər yalnız fake nəqliyyat və loopback (127.0.0.1) üzərində yerli test serveri istifadə edir; real provayder/açar/ödəniş YOXDUR."""
+from safety.execution_context import broker_context
 import ast
 import json
 import threading
@@ -128,7 +129,8 @@ def test_guarded_llm_and_cloud_engine_treat_the_adapter_as_a_real_provider(tmp_p
     eng = CloudEngine(client)
     st = eng.status()
     assert st.state == "ready" and st.is_mock is False and eng.consent_scopes() == ("cloud_paid_use",)    # razılıq tələb olunur
-    assert eng.generate("salam", "", "r1").is_mock is False
+    with broker_context():                                      # real provayder yalnız Broker daxilində (A-8)
+        assert eng.generate("salam", "", "r1").is_mock is False
     assert KEY not in (tmp_path / "llm.jsonl").read_text()
 
 

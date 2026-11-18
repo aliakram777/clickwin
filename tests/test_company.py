@@ -21,6 +21,7 @@ from agents.workflow import PlanStep
 from safety.approvals import ApprovalService, Principal
 from safety.ledger import CostLedger, reconcile
 from tests.factory_keys import MOCK as MOCK_SIGNED, OWNER as OWNER_SIGNED, STRANGER as STRANGER_SIGNED, SYSTEM as SYSTEM_SIGNED, T0, ring
+from tests.owner_proxy import ScopedCompany
 
 ROOT = Path(__file__).resolve().parent.parent
 HUMAN = OWNER_SIGNED
@@ -45,7 +46,7 @@ def env(tmp_path):
     audit = tmp_path / "audit.jsonl"
 
     def make(allow_mock=False):
-        return Company(reg, tmp_path / "company.db", audit, owners={"owner"}, allow_mock=allow_mock, verifier=ring(lambda: T0))
+        return ScopedCompany(reg, tmp_path / "company.db", audit, owners={"owner"}, allow_mock=allow_mock, verifier=ring(lambda: T0))
 
     return reg, make, audit, tmp_path
 

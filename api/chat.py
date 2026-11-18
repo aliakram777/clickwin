@@ -17,6 +17,7 @@ from typing import Any, Callable, Protocol, Sequence
 from agents.hybrid import HybridRouter
 from agents.llm import LLMError
 from agents.mobile import clean_text, speakable
+from safety.dbconn import connect
 
 MAX_TEXT = 2000
 ROLES = ("user", "assistant")
@@ -87,7 +88,7 @@ class ConversationStore:
         self.clock = clock
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=30)
+        self._conn = connect(str(db_path), isolation_level=None, timeout=30)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, "
                            "created_at REAL NOT NULL, updated_at REAL NOT NULL)")

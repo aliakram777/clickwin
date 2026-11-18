@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Protocol
+from safety.dbconn import connect
 
 DEFAULT_APPROVALS_DB = Path("data/approvals.db")
 DEFAULT_AUDIT_PATH = Path("logs/audit.jsonl")
@@ -155,7 +156,7 @@ class _Core:
         self.audit_path = Path(audit_path)
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=30)
+        self.conn = connect(str(db_path), isolation_level=None, timeout=30)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute(_SCHEMA)
 

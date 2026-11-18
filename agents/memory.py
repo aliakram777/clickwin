@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence
+from safety.dbconn import connect
 
 DEFAULT_DB = Path("data/memory.db")
 DEFAULT_AUDIT = Path("logs/memory.jsonl")
@@ -170,7 +171,7 @@ class MemoryService:
         self.clock = clock
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=30)
+        self._conn = connect(str(db_path), isolation_level=None, timeout=30)
         self._conn.row_factory = sqlite3.Row
         for stmt in _SCHEMA:
             self._conn.execute(stmt)

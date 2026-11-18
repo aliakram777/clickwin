@@ -64,6 +64,10 @@ class SignedPrincipal(Principal):
     issued_at: float = 0.0
     expires_at: float = 0.0
     nonce: str = ""
+    # Sahib etibarnaməsi (B-3) YALNIZ BİR dəqiq əməliyyata bağlıdır: əməliyyat adı, hədəf (subject) və parametrlərin SHA-256-sı. Digər rollarda boşdur.
+    scope_op: str = ""
+    scope_subject: str = ""
+    scope_hash: str = ""
     signature: str = field(default="", repr=False, compare=False)
 
 
@@ -88,8 +92,8 @@ def _num(v: Any) -> bool:
 
 
 def _principal_bytes(p: Any) -> bytes:
-    fields = [p.id, p.kind, p.channel, p.role, p.key_id, p.issued_at, p.expires_at, p.nonce]
-    return b"naymera-principal-v2\x1f" + json.dumps(fields, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    fields = [p.id, p.kind, p.channel, p.role, p.key_id, p.issued_at, p.expires_at, p.nonce, p.scope_op, p.scope_subject, p.scope_hash]
+    return b"naymera-principal-v3\x1f" + json.dumps(fields, ensure_ascii=True, separators=(",", ":")).encode("ascii")
 
 
 def _authorization_bytes(a: Any) -> bytes:
@@ -109,22 +113,57 @@ def _b64d(text: str) -> bytes:
 
 # --- açar keyfiyyəti ---
 
+_COMMON_PHRASES = ("password", "passw0rd", "secret", "changeme", "admin", "root", "test", "testing", "naymera", "naymera-signing-key", "signing-key", "signing_key",
+                   "key", "qwerty", "123456", "12345678", "letmein", "welcome", "default", "private", "privatekey", "private-key", "ed25519", "00000000", "a" * 32)
+
+
+def _weak_digests() -> frozenset[bytes]:
+    import hashlib
+    out = set()
+    for ph in _COMMON_PHRASES:
+        b = ph.encode("utf-8")
+        d1 = hashlib.sha256(b).digest()
+        out.update({d1, hashlib.sha256(d1).digest(), hashlib.sha256(b + b"\n").digest(), hashlib.sha256(b.upper()).digest()})
+    return frozenset(out)
+
+
+_WEAK = _weak_digests()
+
+
+def _longest_bit_run(b: bytes) -> int:
+    bits = "".join(f"{x:08b}" for x in b)
+    best = cur = 1
+    for i in range(1, len(bits)):
+        cur = cur + 1 if bits[i] == bits[i - 1] else 1
+        best = max(best, cur)
+    return best
+
+
 def validate_signing_seed(seed: Any) -> None:
-    """Şəxsi açar materialı 32 bayt kriptoqrafik təsadüfi olmalıdır. Zəif/statik nümunələr (təkrar, ardıcıl, çap olunan mətn, az fərqli bayt) rədd edilir.
-    Bu yoxlama təsadüfilik sübutu deyil, yalnız bariz zəif açarları kəsir; açar `secrets.token_bytes(32)` ilə yaradılmalıdır."""
+    """Şəxsi açar materialı 32 bayt kriptoqrafik təsadüfi olmalıdır (`secrets.token_bytes(32)`). Bu yoxlama təsadüfiliyin SÜBUTU DEYİL; bariz zəif/statik/törəmə açarları kəsir
+    (təsadüfi açarın səhvən rədd olunma ehtimalı təxminən 5e-5-dir, generator rədd olunanı yenidən yaradır):
+    az fərqli bayt, bayt təkrarı, sabit-fərqli (arifmetik) ardıcıllıq (istənilən addım, mod 256), qısa dövr, çap olunan/7-bit mətn, bit sayı (monobit) və ən uzun eyni-bit seriyası
+    paylanmadan kənarda, tanınmış parol/ifadə hash-ləri (sha256 və iki-qat sha256)."""
     if not isinstance(seed, (bytes, bytearray)) or len(seed) != 32:
         raise CredentialError("imza açarı tam 32 bayt olmalıdır", "weak_key")
     b = bytes(seed)
-    if len(set(b)) < 16:
+    if len(set(b)) < 20:
         raise CredentialError("imza açarı kifayət qədər təsadüfi deyil (az fərqli bayt)", "weak_key")
+    if max(b.count(x) for x in set(b)) > 4:
+        raise CredentialError("imza açarında bayt çox təkrarlanır", "weak_key")
     for period in (1, 2, 3, 4, 5, 6, 7, 8, 16):
         if all(b[i] == b[i % period] for i in range(32)):
             raise CredentialError("imza açarı təkrarlanan nümunədir", "weak_key")
-    steps = sum(1 for i in range(31) if (b[i + 1] - b[i]) in (1, -1))
-    if steps >= 8:
-        raise CredentialError("imza açarı ardıcıl baytlardan ibarətdir", "weak_key")
-    if all(0x20 <= x <= 0x7E for x in b):
-        raise CredentialError("imza açarı oxunaqlı mətndir (parol deyil, təsadüfi bayt olmalıdır)", "weak_key")
+    diffs = [(b[i + 1] - b[i]) % 256 for i in range(31)]
+    if max(diffs.count(d) for d in set(diffs)) >= 20:
+        raise CredentialError("imza açarı arifmetik/sabit-addımlı ardıcıllıqdır", "weak_key")
+    if all(x < 0x80 for x in b):
+        raise CredentialError("imza açarı oxunaqlı/7-bit mətndir (parol deyil, təsadüfi bayt olmalıdır)", "weak_key")
+    ones = sum(bin(x).count("1") for x in b)
+    if not 88 <= ones <= 168 or _longest_bit_run(b) > 28:
+        raise CredentialError("imza açarının bit paylanması təsadüfi deyil", "weak_key")
+    if b in _WEAK:
+        raise CredentialError("imza açarı tanınmış zəif ifadənin hash-idir", "weak_key")
 
 
 def generate_signing_seed() -> str:
@@ -144,6 +183,8 @@ def decode_signing_seed(text: Any) -> bytes:
     raw = _b64d(text.strip().rstrip("="))
     if len(raw) != 32:
         raise CredentialError("imza açarı 32 bayt deyil", "bad_key")
+    if _b64e(raw) != text.strip().rstrip("="):
+        raise CredentialError("imza açarı kanonik base64 deyil", "bad_key")
     validate_signing_seed(raw)
     return raw
 
@@ -173,6 +214,7 @@ class Keyring:
         self._keys: dict[str, Ed25519PublicKey] = {}
         self._revoked_keys: set[str] = set()
         self._revoked_nonces: set[str] = set()
+        self._revoked_channels: set[str] = set()
         self._frozen = False
         self._control_taken = False
         self._lock = threading.Lock()
@@ -212,6 +254,10 @@ class Keyring:
     def _revoke_credential(self, nonce: str) -> None:
         with self._lock:
             self._revoked_nonces.add(str(nonce))
+
+    def _revoke_channel(self, channel: str) -> None:
+        with self._lock:
+            self._revoked_channels.add(str(channel))
 
     def _freeze(self) -> None:
         with self._lock:
@@ -255,6 +301,17 @@ class Keyring:
         except (TypeError, ValueError):
             raise CredentialError("etibarnamə yanlış formatdadır", "forged_principal") from None
         self._check(payload, principal.signature, principal.key_id, principal.nonce, principal.issued_at, principal.expires_at, MAX_PRINCIPAL_TTL)
+        scoped = (principal.scope_op, principal.scope_subject, principal.scope_hash)
+        if not all(isinstance(x, str) for x in scoped):
+            raise CredentialError("əhatə yanlış formatdadır", "forged_principal")
+        if principal.role in ("owner", "mock_owner"):
+            if not principal.scope_op or not principal.scope_hash:
+                raise CredentialError("sahib etibarnaməsi konkret əməliyyata bağlı olmalıdır (scope)", "scope_missing")
+        elif any(scoped):
+            raise CredentialError("bu rol əhatə daşımamalıdır", "forged_principal")
+        with self._lock:
+            if principal.channel in self._revoked_channels:
+                raise CredentialError("etibarnamənin kanalı ləğv edilib (cihaz)", "credential_revoked")
 
     def check_authorization(self, auth: Any, action: str | None = None) -> None:
         if not isinstance(auth, DispatchAuthorization) or auth.action not in ACTIONS or (action is not None and auth.action != action):
@@ -287,6 +344,10 @@ class KeyringControl:
 
     def revoke_credential(self, nonce: str) -> None:
         self._ring._revoke_credential(nonce)
+
+    def revoke_channel(self, channel: str) -> None:
+        """Kanalın (məs. `stepup:<cihaz>`) BÜTÜN etibarnamələrini dərhal ləğv edir (cihaz ləğvi, B-4)."""
+        self._ring._revoke_channel(channel)
 
 
 # --- imza verən tərəf (YALNIZ etibarlı bootstrap) ---
@@ -330,16 +391,19 @@ class OwnerIssuer:
     `consume(receipt)` -> `(owner_id, device_id)` (bir dəfəlik istifadə, vaxt/cihaz/bağlılıq yoxlaması etibarlı autentifikasiya xidmətindədir) və ya None."""
     __slots__ = ("from_step_up",)
 
-    def __init__(self, mint: Callable[[str, str, str, float], SignedPrincipal], consume: Callable[[Any], tuple[str, str] | None],
-                 ttl: float = DEFAULT_OWNER_TTL) -> None:
+    def __init__(self, mint: Callable[..., SignedPrincipal], consume: Callable[[Any], tuple[str, str, str, str, str] | None],
+                 ttl: float = DEFAULT_OWNER_TTL, action_prefix: str = "factory:") -> None:
         ttl = _ttl(ttl, MAX_PRINCIPAL_TTL)
 
         def from_step_up(receipt: Any) -> SignedPrincipal:
             verified = consume(receipt) if receipt is not None else None
-            if not verified or not all(isinstance(x, str) and x for x in verified):
+            if not verified or len(verified) != 5 or not all(isinstance(x, str) for x in verified) or not (verified[0] and verified[1] and verified[2] and verified[4]):
                 raise CredentialError("yoxlanmış step-up sübutu tələb olunur", "proof_required")
-            owner_id, device_id = verified
-            return mint(owner_id, "human", f"stepup:{device_id}", ttl)
+            owner_id, device_id, action, subject, payload_hash = verified
+            if not action.startswith(action_prefix) or len(action) == len(action_prefix):
+                raise CredentialError("step-up əməliyyatı bu etibarnamə üçün uyğun deyil", "proof_required")
+            # etibarnamə YALNIZ bu step-up-ın bağlandığı əməliyyat/hədəf/parametr hash-ına verilir (B-3)
+            return mint(owner_id, "human", f"stepup:{device_id}", ttl, (action[len(action_prefix):], subject, payload_hash))
 
         object.__setattr__(self, "from_step_up", from_step_up)
 
@@ -353,7 +417,7 @@ class MockOwnerIssuer:
 
     def __init__(self, mint: Callable[[str, str, str, float], SignedPrincipal], ttl: float = DEFAULT_OWNER_TTL) -> None:
         ttl = _ttl(ttl, MAX_PRINCIPAL_TTL)
-        object.__setattr__(self, "principal", lambda owner_id="owner", channel="test": mint(owner_id, "mock", channel, ttl))
+        object.__setattr__(self, "principal", lambda owner_id="owner", channel="test", scope=("mock", "", "0" * 64): mint(owner_id, "mock", channel, ttl, scope))
 
     def __setattr__(self, name: str, value: Any) -> None:
         raise AttributeError("dəyişdirilə bilməz")
@@ -378,10 +442,11 @@ class TrustedSigner:
             if role not in ROLES:
                 raise CredentialError("naməlum rol", "bad_key")
 
-            def mint(pid: str, kind: str, channel: str, ttl: float) -> SignedPrincipal:
+            def mint(pid: str, kind: str, channel: str, ttl: float, scope: tuple[str, str, str] = ("", "", "")) -> SignedPrincipal:
                 now = float(clock())
-                draft = SignedPrincipal(pid, kind, channel, role, key_id, now, now + _ttl(ttl, MAX_PRINCIPAL_TTL), secrets.token_hex(12), "")
-                return SignedPrincipal(pid, kind, channel, role, key_id, draft.issued_at, draft.expires_at, draft.nonce, sign(_principal_bytes(draft)))
+                op, subject, digest = scope
+                draft = SignedPrincipal(pid, kind, channel, role, key_id, now, now + _ttl(ttl, MAX_PRINCIPAL_TTL), secrets.token_hex(12), op, subject, digest, "")
+                return SignedPrincipal(pid, kind, channel, role, key_id, draft.issued_at, draft.expires_at, draft.nonce, op, subject, digest, sign(_principal_bytes(draft)))
             return mint
 
         def sign_auth(task_id: str, agent_id: str, run_op: str, op_id: str, attempt: int, action: str, ttl: float) -> DispatchAuthorization:

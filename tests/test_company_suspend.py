@@ -6,6 +6,7 @@ from agents.registry import Registry
 from agents.spec import AgentSpec
 from safety.approvals import Principal
 from tests.factory_keys import MOCK, OWNER, STRANGER, SYSTEM, T0, ring
+from tests.owner_proxy import ScopedCompany
 
 AGENT = Principal("prog_aaa111", "agent", "runtime")
 
@@ -17,7 +18,7 @@ def spec(name="prog_aaa111", perms=("read_files", "write_files", "spend_money"),
 @pytest.fixture
 def world(tmp_path):
     reg = Registry(":memory:")
-    return Company(reg, tmp_path / "c.db", tmp_path / "audit.jsonl", owners={"owner"}, verifier=ring(lambda: T0)), reg, tmp_path
+    return ScopedCompany(reg, tmp_path / "c.db", tmp_path / "audit.jsonl", owners={"owner"}, verifier=ring(lambda: T0)), reg, tmp_path
 
 
 def test_baseline_registration_is_always_limited_and_allowed_for_the_system(world):

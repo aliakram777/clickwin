@@ -19,15 +19,11 @@ from safety.approvals import ApprovalClient, effect_digest
 from safety.gate import DEFAULT_AUDIT_PATH, DEFAULT_STOP_PATH, Action, Approver, Gate
 from safety.ledger import BudgetPolicy, CostLedger, log_denial
 
-_ACTIVE: ContextVar[bool] = ContextVar("naymera_broker_active", default=False)
+from safety.execution_context import _ACTIVE, in_broker  # noqa: E402,F401  (paylaşılan kontekst: GuardedLLM də oxuyur)
 
 
 class BrokerRequired(RuntimeError):
     """Yan təsirli alət broker-dən kənarda çağırıldı."""
-
-
-def in_broker() -> bool:
-    return _ACTIVE.get()
 
 
 def broker_only(fn: Callable) -> Callable:

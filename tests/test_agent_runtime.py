@@ -16,8 +16,9 @@ from agents.orchestrator import Orchestrator
 from agents.registry import Registry
 from safety.approvals import ApprovalService, Principal
 from safety.ledger import CostLedger, reconcile
-from tests.factory_keys import DISPATCHER, OWNER, SYSTEM, trust
+from tests.factory_keys import DISPATCHER, OWNER, SYSTEM, trust, OWNER_APPROVER
 from tests.test_hybrid_router import Clock, Fake
+from tests.owner_proxy import ScopedCompany, ScopedAgentFactory
 
 LEAK = "sk-test-" + "FAKEKEY1234567890abcdef"
 
@@ -32,8 +33,8 @@ def world(tmp_path, monkeypatch):
     audit, stop = tmp_path / "audit.jsonl", tmp_path / "STOP"
     reg = Registry(":memory:")
     tr = trust(clock)
-    company = Company(reg, tmp_path / "company.db", audit, owners={"owner"}, clock=clock, verifier=tr.ring)
-    factory = AgentFactory(company, tmp_path / "factory.db", audit, tmp_path / "ws", owners={"owner"}, clock=clock, verifier=tr.ring)
+    company = ScopedCompany(reg, tmp_path / "company.db", audit, owners={"owner"}, clock=clock, verifier=tr.ring)
+    factory = ScopedAgentFactory(company, tmp_path / "factory.db", audit, tmp_path / "ws", owners={"owner"}, clock=clock, verifier=tr.ring)
     store = AiStore(tmp_path / "ai.db", clock=clock)
     cloud, local = Fake("cloud", script=["Bulud cavabı: hazırdır"]), Fake("local", state="not_configured")
     store.set_mode(Mode.AUTO, "owner")
@@ -127,7 +128,7 @@ def test_publish_task_waits_for_owner_approval_and_runs_once_after_it(world):
     assert w.factory.view.task(t.task_id).state == "awaiting_approval" and w.factory.view.reports(agent_id=a.agent_id) == []
     assert w.disp.execute(t.task_id).status in ("awaiting_approval",)                       # təsdiq gəlməyib: yenə gözləyir, icra yoxdur
     assert w.cloud.calls == 0
-    out = w.approvals.gateway.approve(r.approval_id, OWNER, "ok")
+    out = w.approvals.gateway.approve(r.approval_id, OWNER_APPROVER, "ok")
     assert out.ok
     r2 = w.disp.execute(t.task_id)
     assert r2.status == "done" and w.cloud.calls == 1
@@ -139,7 +140,7 @@ def test_denied_approval_blocks_the_task_and_nothing_runs(world):
     a = publisher(w)
     t = w.factory.control.assign(a.agent_id, "yayımla", "qaralama", SYSTEM, permission="publish", kind="content")
     r = w.disp.execute(t.task_id)
-    assert w.approvals.gateway.deny(r.approval_id, OWNER, "yox").ok
+    assert w.approvals.gateway.deny(r.approval_id, OWNER_APPROVER, "yox").ok
     r2 = w.disp.execute(t.task_id)
     assert r2.status == "failed" and w.cloud.calls == 0 and w.factory.view.task(t.task_id).state == "failed"
 

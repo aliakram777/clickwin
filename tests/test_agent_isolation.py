@@ -21,8 +21,9 @@ from runtime.agent_gateway import ALLOWED_OPS, AgentGateway, IsolationError
 from agents.factory_auth import CredentialError, Keyring, TrustedSigner, generate_signing_seed
 from api.bootstrap import build_app
 from runtime.factory_bootstrap import CONSOLE_OPS, FactoryStack, OwnerConsole, TrustAnchor, load_signing_config
+from tests.factory_keys import random_seed
 from tests.test_api_auth import pair
-from tests.test_security_boundary import H, authenticate, reach
+from tests.test_security_boundary import H, authenticate, owner_for, reach
 from tests.test_agent_runtime import task, world  # noqa: F401  (fixture)
 
 IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
@@ -39,8 +40,8 @@ def make_prod(tmp_path, *, drop: bool):
     return p
 
 
-def owner(p):
-    return authenticate(p)
+def owner(p, op="create_agent", *args, **kw):
+    return owner_for(p, op, *args, **kw)
 
 
 def program(p, name: str, code: str) -> str:
@@ -50,7 +51,7 @@ def program(p, name: str, code: str) -> str:
 
 
 def agent(p, role="programmer", **kw):
-    return p.stack.console.create_agent(role, owner(p), **kw)
+    return p.stack.console.create_agent(role, owner(p, "create_agent", role, **kw), **kw)
 
 
 @pytest.fixture
@@ -347,7 +348,7 @@ def test_stopping_the_agent_ends_its_session(prod):
     for _ in range(10):
         prod.stack.agents.pump(0.05)
     assert not prod.stack.agents._sessions[sid].done
-    prod.stack.console.stop(a.agent_id, owner(prod), "sınaq")
+    prod.stack.console.stop(a.agent_id, owner(prod, "stop", a.agent_id, "sınaq"), "sınaq")
     while not prod.stack.agents._sessions[sid].done:
         prod.stack.agents.pump(0.05)
     res = prod.stack.agents.result(sid)
@@ -367,7 +368,7 @@ def test_sessions_are_refused_for_unknown_stopped_agents_and_bad_programs(prod, 
     (prod.root / "link.py").symlink_to(prod.root / "ok2.py")
     with pytest.raises(IsolationError):
         gw.open_session(a.agent_id, "link.py")
-    prod.stack.console.stop(a.agent_id, owner(prod))
+    prod.stack.console.stop(a.agent_id, owner(prod, "stop", a.agent_id))
     with pytest.raises(IsolationError):
         gw.open_session(a.agent_id, good)
 
@@ -542,7 +543,7 @@ def test_E1_os_level_hardening_with_unique_uid_and_server_verified_isolation(pro
 # ----------------------------------------------------------------------------- Keyring (B-1 hissə 2)
 
 def test_keyring_has_no_public_mutators_and_control_is_single_use():
-    ring = TrustedSigner("k-kr-001", bytes((i * 37 + 11) % 256 for i in range(32))).verifier()
+    ring = TrustedSigner("k-kr-001", random_seed()).verifier()
     for name in ("add_public_key", "revoke_key", "revoke_credential", "freeze", "replace_key"):
         assert not hasattr(ring, name), name
     control = ring.take_control()
@@ -556,7 +557,7 @@ def test_E1a_keyring_is_frozen_after_bootstrap_and_revocation_is_control_plane_o
     ring = prod.anchor.verifier
     assert ring.frozen is True and ring.key_ids() == ("k-iso-001",)
     # E1a: hücumçunun açıq açarını etibarlı etmək cəhdləri
-    evil = TrustedSigner("evil-key-1", bytes((i * 53 + 7) % 256 for i in range(32)))
+    evil = TrustedSigner("evil-key-1", random_seed())
     with pytest.raises(AttributeError):
         ring.add_public_key("evil-key-1", evil.public_key)                   # ictimai mutator yoxdur
     with pytest.raises(CredentialError) as e:
@@ -565,13 +566,13 @@ def test_E1a_keyring_is_frozen_after_bootstrap_and_revocation_is_control_plane_o
     with pytest.raises(CredentialError) as e:
         ring._add("evil-key-1", evil.public_key)                             # hətta daxili metod da dondurulmuş konfiqurasiyada rədd edir
     assert e.value.code == "keyring_frozen"
-    forged = evil.owner_issuer(lambda r: ("owner", "dev"), ttl=600).from_step_up(object())
+    forged = evil.owner_issuer(lambda r: ("owner", "dev", "factory:" + r[0], r[1], r[2]), ttl=600).from_step_up(("create_agent", "programmer", "0" * 64))
     with pytest.raises(Exception) as e2:                                     # hücumçu imzası etibarlı deyil: Company da, fabrik də rədd edir
         prod.stack.console.set_policy(forged, global_budget_cap=5.0)
     assert getattr(e2.value, "code", "") == "forged_principal"
     assert ring.key_ids() == ("k-iso-001",)
     # ləğv yalnız etibarlı control-plane (TrustAnchor) ilə
-    ow = owner(prod)
+    ow = owner(prod, "create_agent", "programmer")
     prod.stack.console.create_agent("programmer", ow)
     prod.anchor.revoke_credential(ow.nonce)
     with pytest.raises(Exception) as e3:
@@ -581,10 +582,10 @@ def test_E1a_keyring_is_frozen_after_bootstrap_and_revocation_is_control_plane_o
 
 
 def test_keyring_frozen_state_is_irreversible_and_add_is_refused_for_any_key():
-    signer = TrustedSigner("k-fz-001", bytes((i * 29 + 3) % 256 for i in range(32)))
+    signer = TrustedSigner("k-fz-001", random_seed())
     ring = signer.verifier()
     control = ring.take_control()
-    other = TrustedSigner("k-fz-002", bytes((i * 31 + 5) % 256 for i in range(32)))
+    other = TrustedSigner("k-fz-002", random_seed())
     control.add_public_key("k-fz-002", other.public_key)
     control.freeze()
     with pytest.raises(CredentialError):

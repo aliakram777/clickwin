@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Mapping
 
+from safety.dbconn import LockedConnection
+
 DEFAULT_LEDGER_PATH = Path("data/ledger.db")
 _EPS = 1e-9
 
@@ -73,7 +75,7 @@ class CostLedger:
     def __init__(self, db_path: str | Path = DEFAULT_LEDGER_PATH) -> None:
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=30)
+        self._conn = LockedConnection(str(db_path), isolation_level=None, timeout=30)
         self._conn.execute(_SCHEMA)
         self._migrate()
 
@@ -89,15 +91,9 @@ class CostLedger:
                 self._conn.execute("ALTER TABLE costs ADD COLUMN unknown INTEGER NOT NULL DEFAULT 0")
                 self._conn.execute("UPDATE costs SET reserved = amount WHERE reserved IS NULL")
 
-    @contextmanager
-    def _tx(self) -> Iterator[None]:
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
-            yield
-        except BaseException:
-            self._conn.execute("ROLLBACK")
-            raise
-        self._conn.execute("COMMIT")
+    def _tx(self):
+        """İpə-təhlükəsiz tranzaksiya: kilid BEGIN-dən COMMIT-ə qədər saxlanır (audit B-5/A-7: ipler arası çarpazlaşma yoxdur)."""
+        return self._conn.transaction()
 
     # --- yazma ---
     def record(self, op_id: str, agent: str, amount: float, description: str = "") -> bool:
@@ -192,6 +188,41 @@ class CostLedger:
         cur = self._conn.execute(
             "UPDATE costs SET unknown = 1 WHERE op_id = ? AND status = 'reserved'", (op_id,))
         return cur.rowcount == 1
+
+    def stale_reserved(self, older_than_s: float, now: datetime | None = None) -> list[LedgerEntry]:
+        """`older_than_s`-dən köhnə, hələ nə təsdiqlənmiş, nə azad edilmiş, nə də naməlum işarələnmiş rezervlər (sızma namizədləri)."""
+        cutoff = (now or datetime.now(timezone.utc)).timestamp() - float(older_than_s)
+        out = []
+        for e in self.entries():
+            if e.status == "reserved" and not e.unknown:
+                try:
+                    if datetime.fromisoformat(e.ts).timestamp() <= cutoff:
+                        out.append(e)
+                except ValueError:
+                    out.append(e)      # oxunmayan vaxt damğası: sızma sayılır (qapalı qalır)
+        return out
+
+    def expire_stale(self, older_than_s: float, now: datetime | None = None) -> list[str]:
+        """Köhnə rezervləri AZAD ETMİR: naməlum işarələyir (məbləğ qorunur, sahib uzlaşdırması tələb olunur). İşarələnən op_id-ləri qaytarır."""
+        ids = [e.op_id for e in self.stale_reserved(older_than_s, now)]
+        return [i for i in ids if self.mark_unknown(i)]
+
+    def resolve_unknown(self, op_id: str, actual: float | None, resolved_by: str) -> bool:
+        """SAHİB uzlaşdırması (yalnız `unknown` rezerv üçün): `actual` verilibsə faktiki xərclə təsdiqlənir, `None` isə xərc olmadığı təsdiqlənərək azad edilir.
+        Naməlum olmayan və ya olmayan op_id üçün False."""
+        _check_text("resolved_by", resolved_by)
+        with self._tx():
+            row = self._conn.execute("SELECT 1 FROM costs WHERE op_id = ? AND status = 'reserved' AND unknown = 1", (op_id,)).fetchone()
+            if row is None:
+                return False
+            if actual is None:
+                self._conn.execute("UPDATE costs SET amount = 0, status = 'released', unknown = 0, description = description || ? WHERE op_id = ?",
+                                   (f" [uzlaşdırıldı:{resolved_by}:azad]", op_id))
+            else:
+                _check_amount("faktiki xərc", actual)
+                self._conn.execute("UPDATE costs SET amount = ?, status = 'committed', unknown = 0, description = description || ? WHERE op_id = ?",
+                                   (float(actual), f" [uzlaşdırıldı:{resolved_by}]", op_id))
+        return True
 
     # --- oxuma ---
     def has(self, op_id: str) -> bool:
