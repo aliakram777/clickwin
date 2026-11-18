@@ -18,6 +18,7 @@ from runtime.production import build_production
 from safety.execution_context import broker_context
 from safety.ledger import CostLedger, LedgerPort, ResolutionDenied, clear_provider_breaker_scope
 from tests.factory_keys import owner_cred
+from tests.engine_support import trust_test_types  # noqa: F401  (fixture)
 from tests.ledger_helpers import owned_ledger
 from tests.test_api_auth import pair
 from tests.test_hybrid_router import Fake
@@ -177,23 +178,27 @@ def test_duck_typed_paid_engine_is_rejected_by_default_and_never_reaches_the_rou
         make_app(tmp_path, local_engine=RogueCloud())
 
 
-def test_cloud_engine_with_an_unsupported_client_is_rejected_even_with_the_test_flag(tmp_path):
+def test_cloud_engine_with_an_unsupported_client_is_rejected_even_when_test_types_are_registered(tmp_path, trust_test_types):
     class PaidClient:
         is_mock = False
 
         def complete(self, prompt, system=""):
             raise AssertionError("çağırılmamalıdır")
-    for flag in (False, True):
+    for registered in (False, True):
+        if registered:
+            trust_test_types(CloudEngine, PaidClient)                                     # məlum tiplərin yoxlaması test reyestri ilə də tətbiq olunur
         with pytest.raises(ValueError, match="yalnız GuardedLLM"):
-            make_app(tmp_path, cloud_engine=CloudEngine(PaidClient()), allow_unaudited_engines=flag)
+            make_app(tmp_path, cloud_engine=CloudEngine(PaidClient()))
 
 
-def test_provider_self_declared_is_mock_is_not_trusted(tmp_path):
+def test_provider_self_declared_is_mock_is_not_trusted(tmp_path, trust_test_types):
     led = CostLedger(tmp_path / "l.db")
     cfg = LLMConfig(provider="mock")
-    for flag in (False, True):
+    for registered in (False, True):
+        if registered:
+            trust_test_types(CloudEngine, GuardedLLM, LyingProvider)
         with pytest.raises(ValueError, match="naməlum provayder tipi"):
-            make_app(tmp_path, cloud_engine=CloudEngine(GuardedLLM(LyingProvider(), cfg, ledger=led)), ledger=led, allow_unaudited_engines=flag)
+            make_app(tmp_path, cloud_engine=CloudEngine(GuardedLLM(LyingProvider(), cfg, ledger=led)), ledger=led)
 
     class SubGuarded(GuardedLLM):                                                         # alt sinif də etibarlı deyil (tam tip yoxlanılır)
         pass
@@ -201,7 +206,7 @@ def test_provider_self_declared_is_mock_is_not_trusted(tmp_path):
         make_app(tmp_path, cloud_engine=CloudEngine(SubGuarded(MockProvider(), cfg)))
 
 
-def test_local_engine_runtime_types_are_validated(tmp_path):
+def test_local_engine_runtime_types_are_validated(tmp_path, trust_test_types):
     class Rogue:
         is_mock = False
         languages = ("en",)
@@ -215,7 +220,10 @@ def test_local_engine_runtime_types_are_validated(tmp_path):
         make_app(tmp_path, local_engine=LocalEngine(Rogue()))
     make_app(tmp_path, local_engine=LocalEngine(None))
     make_app(tmp_path, local_engine=LocalEngine(MockLocalRuntime()))
-    make_app(tmp_path, local_engine=LocalEngine(PersonalServerRuntime()))
+    make_app(tmp_path, local_engine=LocalEngine(PersonalServerRuntime()))                # nəqliyyatsız (qurulmamış): qəbul olunur
+    with pytest.raises(ValueError, match="nəqliyyatlı PersonalServerRuntime"):
+        make_app(tmp_path, local_engine=LocalEngine(PersonalServerRuntime(lambda op, p: {"text": "x"}, is_mock=False)))
+    trust_test_types(FakeTransport)                                                       # FakeTransport yalnız test reyestri ilə (UrllibTransport(kind=private) istehsal nəqliyyatıdır)
     real_local = build_engines({"NAYMERA_LOCAL_AI_URL": "http://192.168.1.20:8000", "NAYMERA_LOCAL_AI_MODEL": "small"}, log_dir=tmp_path, stop_path=tmp_path / "STOP",
                                transport=FakeTransport([ok_body()]))
     assert type(real_local.local.runtime).__name__ == "OpenAICompatLocalRuntime"
@@ -238,21 +246,6 @@ def test_real_engine_with_an_explicit_identical_ledger_is_still_accepted_and_oth
         make_app(tmp_path, global_limit=0.5, cloud_engine=eng.cloud)
     with pytest.raises(ValueError):
         make_app(tmp_path, global_limit=0.5, cloud_engine=eng.cloud, ledger=CostLedger(tmp_path / "o.db", global_limit=0.5))
-
-
-def test_the_unaudited_flag_exists_only_for_unknown_engine_types_and_production_never_passes_it(tmp_path):
-    make_app(tmp_path, cloud_engine=Fake("cloud", is_mock=True), allow_unaudited_engines=True)          # test: yalnız açıq bayrakla
-    offenders = []
-    for d in ("runtime", "tools", "api", "agents", "safety"):
-        for p in (ROOT / d).rglob("*.py"):
-            for node in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
-                if isinstance(node, ast.Call) and any(k.arg == "allow_unaudited_engines" for k in node.keywords):
-                    offenders.append(p.relative_to(ROOT).as_posix())
-    assert offenders == [], offenders                                                      # istehsal kodu bayrağı HEÇ VAXT ötürmür
-    src = (ROOT / "api" / "bootstrap.py").read_text(encoding="utf-8")
-    assert "allow_unaudited_engines: bool = False" in src                                  # defolt qapalıdır
-    svc, _, _ = build_production(tmp_path / "p", {}, global_limit=0.0)
-    assert svc.ledger.global_limit == 0.0
 
 
 # ============================================================================ (3) çıxış tavanı pozuntusu

@@ -112,6 +112,8 @@ Mərhələ 17 — Real AI runtime və avtonom agent fabrikası (məhdud agent ya
 
 - Mərhələ 17 / PR #26 — xərc rezervi UTF-8 baytla (Unicode/emoji/CJK üçün yuxarı hədd); tavan daxilində rezervi aşma (dürüst tokenizer fərqi) kəsici açmır, dəqiq yazılır və bildirilir, maliyyə kəsicisi yalnız tavan aşılanda; `build_app` fail-closed (yalnız tam tipi etibarlı mühərriklər, özü-bəyan `is_mock`-a güvənilmir, test bayrağı `allow_unaudited_engines` yalnız naməlum tiplər üçün və istehsalda ötürülmür); çıxış tavanı pozuntusu atomik `output_ceiling_violation` + AYRI provayder kəsicisi (sahib təsdiqi ilə təmizlənir), `LLMBudgetOverrun(ceiling_exceeded=True)`. Testlər: `tests/test_unicode_engine_ceiling.py`.
 
+- Mərhələ 17 / PR #27 — `private` endpoint yalnız həqiqətən lokal (ictimai DNS/IP, HTTPS ilə də, artıq `LocalEngine` olmur); provayder hər sorğuda, `UrllibTransport(kind=...)` hər sorğunun URL-ində endpoint siyasətini yenidən yoxlayır; `build_app` nəqliyyatlı `PersonalServerRuntime`-ı və qeydsiz nəqliyyatı rədd edir; `allow_unaudited_engines` parametri silindi (test-only dəqiq-tip reyestri, pytest-siz proses RuntimeError, AST testi). Testlər: `tests/test_local_runtime_bypass.py`. Qalan risklər: AGENT_FACTORY.md.
+
 ## Növbəti addımlar (təsdiq gözləyir)
 - LLM əsaslı Planner (interfeys hazırdır, real API təsdiq tələb edir)
 - Asılılıq çıxışlarının növbəti addıma ötürülməsi, retry gözləməsi (backoff)

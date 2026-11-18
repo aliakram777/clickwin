@@ -3,6 +3,7 @@ və xərc limiti burada QOŞULMUR (sahib qərarı və ayrıca mərhələ). Mühi
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -27,7 +28,7 @@ from api.jobs import JobService
 from safety.approvals import ApprovalService
 from runtime.brokered_llm import BrokeredRouter
 from runtime.factory_bootstrap import FactoryStack, TrustAnchor
-from agents.providers import OpenAICompatibleProvider, OpenAICompatLocalRuntime
+from agents.providers import EndpointError, OpenAICompatibleProvider, OpenAICompatLocalRuntime, enforces_endpoint_kind, validate_endpoint
 from safety.ledger import CostLedger, LedgerPort, LedgerReconciler, ledger_backend
 
 
@@ -50,16 +51,54 @@ class Services:
     ledger: CostLedger | None = None             # TƏK paylaşılan xərc kitabı (Broker, büdcə siyasəti, Cloud LLM, uzlaşdırma): etibarlı server kodu; ApiApp-a verilmir
 
 
-_LOCAL_RUNTIME_TYPES = (MockLocalRuntime, PersonalServerRuntime, OpenAICompatLocalRuntime)     # etibarlı LOKAL (ödənişli Cloud olmayan) icra mühitləri
+# YALNIZ TEST: pytest daxilində testlərin ördək tipli saxta mühərrikləri/nəqliyyatları üçün dəqiq tip siyahısı (`monkeypatch.setattr(bootstrap, "_TEST_ONLY_TYPES", frozenset({Fake}))`).
+# `build_app` API-sinin parametri DEYİL; istehsal kodu bunu təyin etmir (AST testi) və pytest yüklənməyibsə qeyd edilmiş tip varsa `RuntimeError` verilir (istehsalda aktivləşə bilməz).
+_TEST_ONLY_TYPES: frozenset = frozenset()
 
 
-def _check_engines(ledger: Any, engines: Sequence[tuple[str, Any]], allow_unaudited: bool) -> CostLedger | None:
+def _test_only(obj: Any) -> bool:
+    if not _TEST_ONLY_TYPES:
+        return False
+    if "pytest" not in sys.modules:
+        raise RuntimeError("_TEST_ONLY_TYPES yalnız pytest daxilində istifadə oluna bilər (istehsalda qadağandır)")
+    return type(obj) in _TEST_ONLY_TYPES
+
+
+def _trusted_local_transport(transport: Any) -> bool:
+    """Lokal runtime-ın provayderi YALNIZ özəl hədəf siyasətini hər sorğuda məcburi tətbiq edən qeydli nəqliyyatla (`kind="private"`) qəbul olunur; ixtiyari callable/alt sinif → rədd."""
+    return enforces_endpoint_kind(transport, "private") or _test_only(transport)
+
+
+def _check_local_runtime(label: str, rt: Any) -> None:
+    kind = type(rt)
+    if rt is None or kind is MockLocalRuntime:
+        return
+    if kind is PersonalServerRuntime:
+        # İxtiyari nəqliyyat (callable) istənilən (ödənişli) uzaq servisə qoşulub kitabı yan keçə bilər: yalnız qurulmamış (transport=None) PersonalServerRuntime qəbul olunur.
+        # Həqiqi lokal server (Ollama/llama.cpp) üçün OpenAICompatLocalRuntime (yoxlanmış özəl endpoint) istifadə edin.
+        if rt.transport is not None:
+            raise ValueError(f"{label}: nəqliyyatlı PersonalServerRuntime rədd edildi (ixtiyari nəqliyyat uzaq/ödənişli servisə qoşula bilər); OpenAICompatLocalRuntime + özəl endpoint istifadə edin")
+        return
+    if kind is OpenAICompatLocalRuntime:
+        provider = rt.provider
+        if type(provider) is not OpenAICompatibleProvider or provider.kind != "private":
+            raise ValueError(f"{label}: lokal runtime yalnız özəl OpenAICompatibleProvider ilə qəbul olunur")
+        try:
+            validate_endpoint(provider.base_url, "private")
+        except EndpointError as exc:
+            raise ValueError(f"{label}: lokal runtime endpoint-i həqiqətən lokal deyil ({exc})") from None
+        if not _trusted_local_transport(provider._transport):
+            raise ValueError(f"{label}: lokal runtime nəqliyyatı etibarlı deyil (endpoint siyasətini məcburi tətbiq edən qeydli nəqliyyat, kind='private', tələb olunur)")
+        return
+    raise ValueError(f"{label}: naməlum lokal icra mühiti tipi rədd edildi: {kind.__name__}")
+
+
+def _check_engines(ledger: Any, engines: Sequence[tuple[str, Any]]) -> CostLedger | None:
     """FAIL-CLOSED mühərrik yoxlaması (ödənişli yolun bölünmüş kitab/yan keçid riskinə qarşı). Yalnız TAM tipi etibarlı olan mühərriklər qəbul olunur (alt siniflər/ördək tipli obyektlər YOX):
     - `None`; `CloudEngine(None)` (qurulmayıb); `CloudEngine(GuardedLLM(MockProvider))` (mock: provayderin özü-bəyan etdiyi `is_mock` bayrağına GÜVƏNİLMİR, konkret tip yoxlanılır);
-    - `CloudEngine(GuardedLLM(OpenAICompatibleProvider))` real ödənişli: açıq `ledger=` TƏLƏB OLUNUR və mühərrikin kitabı EYNİ arxa uc olmalıdır;
-    - `LocalEngine(None | MockLocalRuntime | PersonalServerRuntime | OpenAICompatLocalRuntime)`.
-    Hər şey başqa (naməlum/ördək tipli mühərrik, GuardedLLM olmayan müştəri, naməlum provayder/icra mühiti) `ValueError`. `allow_unaudited` (yalnız TEST üçün, `build_app(allow_unaudited_engines=True)`)
-    yalnız naməlum mühərrik TİPLƏRİNƏ icazə verir; məlum tiplərin yoxlamaları həmişə tətbiq olunur. İstehsal yığılması (`runtime/production.py`, `tools/serve.py`) bu bayrağı HEÇ VAXT ötürmür (AST testi)."""
+    - `CloudEngine(GuardedLLM(OpenAICompatibleProvider))` real ödənişli (ictimai/uzaq endpoint daxil): açıq `ledger=` TƏLƏB OLUNUR və mühərrikin kitabı EYNİ arxa uc olmalıdır;
+    - `LocalEngine(None | MockLocalRuntime | nəqliyyatsız PersonalServerRuntime | OpenAICompatLocalRuntime(özəl endpoint + endpoint-tətbiq edən qeydli nəqliyyat))`.
+    Hər şey başqa `ValueError`. Test fake-ləri yalnız pytest daxilində `_TEST_ONLY_TYPES` ilə (parametr YOXDUR)."""
     raw = None
     if ledger is not None:
         raw = ledger_backend(ledger)
@@ -88,16 +127,15 @@ def _check_engines(ledger: Any, engines: Sequence[tuple[str, Any]], allow_unaudi
             if backend is not raw:
                 raise ValueError(f"{label}: real ödənişli mühərrikin kitabı build_app kitabı ilə EYNİ deyil (bölünmüş kitab): bir paylaşılan CostLedger istifadə edin")
         elif kind is LocalEngine:
-            if eng.runtime is not None and type(eng.runtime) not in _LOCAL_RUNTIME_TYPES:
-                raise ValueError(f"{label}: naməlum lokal icra mühiti tipi rədd edildi: {type(eng.runtime).__name__}")
-        elif not allow_unaudited:
+            _check_local_runtime(label, eng.runtime)
+        elif not _test_only(eng):
             raise ValueError(f"{label}: naməlum mühərrik tipi ({kind.__name__}) rədd edildi: yalnız CloudEngine/LocalEngine (etibarlı müştəri/provayder/icra mühiti ilə) qəbul olunur")
     return raw
 
 
 def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: float = 0.0,
               https: bool = False, cloud_engine: Any = None, local_engine: Any = None, trust: TrustAnchor | None = None,
-              agent_isolation: dict | None = None, ledger: CostLedger | None = None, allow_unaudited_engines: bool = False) -> Services:
+              agent_isolation: dict | None = None, ledger: CostLedger | None = None) -> Services:
     """`ledger`: istehsalda Cloud mühərriki ilə PAYLAŞILAN tək kitab (`runtime/production.py`). Verilibsə onun ümumi tavanı `global_limit`-ə bərabər və doğrulayıcısı `trust.verifier` olmalıdır:
     əks halda ikinci/uyğunsuz kitab səssizcə qəbul olunmur (`ValueError`). Verilməyibsə `ledger.db` burada yaradılır."""
     d = Path(data_dir)
@@ -108,7 +146,7 @@ def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: fl
     company = Company(reg, d / "company.db", audit, owners={owner_id}, verifier=trust.verifier if trust is not None else None)
     events = EventStore(d / "events.db")
     verifier = trust.verifier if trust is not None else None
-    ledger = _check_engines(ledger, (('cloud_engine', cloud_engine), ('local_engine', local_engine)), allow_unaudited_engines)
+    ledger = _check_engines(ledger, (('cloud_engine', cloud_engine), ('local_engine', local_engine)))
     if ledger is None:
         ledger = CostLedger(d / "ledger.db", verifier=verifier, owners={owner_id}, global_limit=global_limit)
     else:
