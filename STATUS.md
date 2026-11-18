@@ -108,6 +108,8 @@ Mərhələ 17 — Real AI runtime və avtonom agent fabrikası (məhdud agent ya
 
 - Mərhələ 17 / PR #24 (son audit tapıntıları) — TƏK paylaşılan `CostLedger` (Cloud LLM, Broker, büdcə siyasəti, uzlaşdırma; `runtime/production.build_production`, ayrıca `llm_ledger.db` ləğv edildi); ümumi tavan kitabın özündə (`CostLedger(global_limit=)`: sistem söhbəti və agent çağırışları birlikdə aşa bilmir); `commit/release` naməlum rezervə toxunmur (yalnız `resolve_unknown`); icra qatı dar `LedgerPort` görür; `ApiApp`/HTTP obyekt qrafında imza açarı, xam kitab, uzlaşdırma yoxdur (testlə); root tələb edən izolyasiya testləri üçün ayrıca `isolation-privileged` CI işi + `tools/run_privileged_isolation_tests.sh` (atlama = uğursuzluq); fayl sistemi izolyasiyasının TAM OLMADIĞI açıq sənədləşib. Testlər: `tests/test_shared_ledger.py`, `tests/test_api_object_graph.py`, `tests/test_isolation_limits.py`, `tests/test_ci_privileged_policy.py`. Qalan risklər: AGENT_FACTORY.md.
 
+- Mərhələ 17 / PR #25 — `build_app` real ödənişli mühərrik üçün açıq, EYNİ kitabı tələb edir (bölünmüş kitab yan keçidi bağlandı); faktiki xərc dəqiq yazılır, rezerv mühafizəkardır, aşma auditə yazılır və davamlı "tavan aşıldı" kəsicisi açır (hər yeni rezerv, sıfır xərclilər daxil, sahib step-up təsdiqi ilə təmizlənənə qədər rədd edilir); aşma çağırana `LLMBudgetOverrun`/`cost_status=overrun` ilə bildirilir. Testlər: `tests/test_build_app_engine_ledger.py`, `tests/test_overrun_breaker.py`. Uçuşdakı provayder haqqı geri qaytarıla bilməz (AGENT_FACTORY.md).
+
 ## Növbəti addımlar (təsdiq gözləyir)
 - LLM əsaslı Planner (interfeys hazırdır, real API təsdiq tələb edir)
 - Asılılıq çıxışlarının növbəti addıma ötürülməsi, retry gözləməsi (backoff)

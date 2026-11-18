@@ -27,7 +27,7 @@ from api.jobs import JobService
 from safety.approvals import ApprovalService
 from runtime.brokered_llm import BrokeredRouter
 from runtime.factory_bootstrap import FactoryStack, TrustAnchor
-from safety.ledger import CostLedger, LedgerPort, LedgerReconciler
+from safety.ledger import CostLedger, LedgerPort, LedgerReconciler, ledger_backend
 
 
 def _no_runner(spec: Any, data: dict) -> dict:
@@ -49,6 +49,30 @@ class Services:
     ledger: CostLedger | None = None             # TƏK paylaşılan xərc kitabı (Broker, büdcə siyasəti, Cloud LLM, uzlaşdırma): etibarlı server kodu; ApiApp-a verilmir
 
 
+def _check_engine_ledgers(ledger: Any, *engines: Any) -> CostLedger | None:
+    """Real (mock olmayan) ödənişli mühərrik (`GuardedLLM` müştərisi olan) üçün: açıq `ledger=` TƏLƏB OLUNUR və mühərrikin kitabı EYNİ arxa uc kitab olmalıdır; əks halda `ValueError`
+    (build_app səssizcə ikinci kitab yaratmır: ümumi tavan və uzlaşdırma yan keçilməsin). Mock/qurulmayan mühərriklər üçün məhdudiyyət yoxdur. Yalnız `client` (GuardedLLM) bildirən
+    mühərriklər yoxlanıla bilir: başqa mühərrik növləri ödənişli yol kimi `runtime/production.build_production` ilə qurulmalıdır. Xam `CostLedger` qaytarır (verilməyibsə None)."""
+    raw = None
+    if ledger is not None:
+        raw = ledger_backend(ledger)
+        if raw is None:
+            raise ValueError("ledger CostLedger (və ya LedgerPort) olmalıdır")
+    for eng in engines:
+        client = getattr(eng, "client", None)
+        provider = getattr(client, "provider", None)
+        if client is None or provider is None or bool(getattr(provider, "is_mock", False)):
+            continue
+        if raw is None:
+            raise ValueError("real ödənişli mühərrik üçün açıq `ledger=` tələb olunur (build_app ikinci kitab yaratmır); `runtime.production.build_production` istifadə edin")
+        backend = ledger_backend(getattr(client, "ledger", None))
+        if backend is None:
+            raise ValueError("real ödənişli mühərrikin xərc kitabı yoxdur: ödənişli çağırış kitabsız qurula bilməz")
+        if backend is not raw:
+            raise ValueError("real ödənişli mühərrikin kitabı build_app kitabı ilə EYNİ deyil (bölünmüş kitab): bir paylaşılan CostLedger istifadə edin")
+    return raw
+
+
 def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: float = 0.0,
               https: bool = False, cloud_engine: Any = None, local_engine: Any = None, trust: TrustAnchor | None = None,
               agent_isolation: dict | None = None, ledger: CostLedger | None = None) -> Services:
@@ -62,6 +86,7 @@ def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: fl
     company = Company(reg, d / "company.db", audit, owners={owner_id}, verifier=trust.verifier if trust is not None else None)
     events = EventStore(d / "events.db")
     verifier = trust.verifier if trust is not None else None
+    ledger = _check_engine_ledgers(ledger, cloud_engine, local_engine)
     if ledger is None:
         ledger = CostLedger(d / "ledger.db", verifier=verifier, owners={owner_id}, global_limit=global_limit)
     else:

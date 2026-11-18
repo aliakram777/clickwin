@@ -363,17 +363,17 @@ def test_funded_agent_spend_is_reserved_and_settled_in_the_ledger_under_its_own_
 
 def test_exhausted_budget_blocks_further_paid_requests_and_total_never_exceeds_the_budget(paid):
     w = paid
-    a = funded(w, 0.03)
+    a = funded(w, 0.1)
     outcomes = []
     for i in range(12):
         t = w.factory.control.assign(a.agent_id, f"t{i}", f"sual {i}", SYSTEM)
         outcomes.append(w.disp.execute_with_retry(t.task_id).status)
-        assert sum(e.amount for e in llm_entries(w) if e.agent == a.name) <= 0.03 + 1e-9
+        assert sum(e.amount for e in llm_entries(w) if e.agent == a.name) <= 0.1 + 1e-9
         if w.factory.view.agent(a.agent_id).status != "active":
             break
     assert "done" in outcomes and "failed" in outcomes
     assert w.provider.calls == outcomes.count("done")                                   # rədd olunan sorğu provayderə getməyib
-    assert w.ledger.agent_total(a.name) <= 0.03 + 1e-9
+    assert w.ledger.agent_total(a.name) <= 0.1 + 1e-9
 
 
 def test_budget_checked_by_the_ledger_for_each_agent_independently(paid):
@@ -394,7 +394,7 @@ def test_global_consent_is_still_required_for_funded_agents(paid):
 
 def test_llm_wide_cost_cap_still_applies_across_agents(paid):
     w = paid
-    w.llm.config = dataclasses.replace(w.llm.config, cost_limit=0.06)                     # LLM-ə ümumi tavan
+    w.llm.config = dataclasses.replace(w.llm.config, cost_limit=0.1)                     # LLM-ə ümumi tavan
     w.factory.admin.set_policy(OWNER, auto_stop_after_failures=1000)
     a1, a2 = funded(w, 1.0), funded(w, 1.0, "researcher")
     statuses = []
@@ -402,7 +402,7 @@ def test_llm_wide_cost_cap_still_applies_across_agents(paid):
         for ag, kind in ((a1, None), (a2, "research")):
             statuses.append(w.disp.execute_with_retry(w.factory.control.assign(ag.agent_id, f"t{i}", f"sual {i}{ag.name}", SYSTEM, kind=kind).task_id).status)
     assert "done" in statuses and "failed" in statuses
-    assert sum(e.amount for e in llm_entries(w)) <= 0.06 + 1e-9
+    assert sum(e.amount for e in llm_entries(w)) <= 0.1 + 1e-9
 
 
 def test_global_ledger_limit_is_enforced_for_agent_spend(paid):
@@ -428,6 +428,8 @@ def test_failed_settlement_fails_closed_keeps_the_reservation_and_marks_it_for_r
     t = w.factory.control.assign(a.agent_id, "iş", "sual", SYSTEM)
     real_commit = w.ledger.commit
     monkeypatch.setattr(w.ledger, "commit", lambda op_id, actual: False if op_id.startswith("llm:") else real_commit(op_id, actual))
+    real_settle = w.ledger.settle
+    monkeypatch.setattr(w.ledger, "settle", lambda op_id, actual: False if op_id.startswith("llm:") else real_settle(op_id, actual))     # GuardedLLM indi settle() çağırır
     r = w.disp.execute_with_retry(t.task_id)
     assert r.status == "failed" and w.factory.view.reports() == []                        # nəticə qəbul edilmir
     assert w.provider.calls == 1                                                          # təkrar ödəniş olmayıb
@@ -447,6 +449,8 @@ def test_settlement_exception_also_fails_closed(paid, monkeypatch):
             raise sqlite3.OperationalError("disk")
         return real_commit(op_id, actual)
     monkeypatch.setattr(w.ledger, "commit", boom)
+    real_settle = w.ledger.settle
+    monkeypatch.setattr(w.ledger, "settle", lambda op_id, actual: boom(op_id, actual) if op_id.startswith("llm:") else real_settle(op_id, actual))
     r = w.disp.execute_with_retry(w.factory.control.assign(a.agent_id, "iş", "sual", SYSTEM).task_id)
     assert r.status == "failed" and w.provider.calls == 1 and w.factory.view.reports() == []
     assert any(x.unknown for x in llm_entries(w))

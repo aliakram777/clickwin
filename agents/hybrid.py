@@ -25,7 +25,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
 
-from agents.llm import (LLMBlocked, LLMBudgetExceeded, LLMError, LLMResult, LLMTimeout, LLMUnavailable, estimate_tokens,
+from agents.llm import (LLMBlocked, LLMBudgetOverrun, LLMBudgetExceeded, LLMError, LLMResult, LLMTimeout, LLMUnavailable, estimate_tokens,
                         redact)
 from agents.local_models import LocalModelSpec, ResourceGuard
 from agents.memory import CATEGORIES, MemoryRecord, detect_secrets, untrusted_context
@@ -178,6 +178,8 @@ class CloudEngine:
             raise EngineBlocked(str(exc)) from None
         except LLMTimeout as exc:
             raise EngineTimeout(str(exc)) from None
+        except LLMBudgetOverrun as exc:   # ödənilmiş, lakin tavanı/rezervi aşan cavab: "uğur" kimi qaytarılmır (kəsici açılıb)
+            raise EngineUnavailable(f"budget_overrun: {exc}") from None
         except LLMBudgetExceeded as exc:
             raise EngineUnavailable(f"budget: {exc}") from None
         except LLMUnavailable as exc:
