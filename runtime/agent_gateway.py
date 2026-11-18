@@ -1,15 +1,16 @@
-"""Agent izolyasiya sərhədi: agent kodu AYRI OS prosesində işləyir; etibarlı server ilə yalnız minimal, autentifikasiyalı RPC danışır (audit B-1/B-2).
+"""Agent izolyasiya sərhədi: agent kodu AYRI OS prosesində işləyir; etibarlı server ilə yalnız minimal, autentifikasiyalı RPC danışır (audit B-1/B-2, H-1..H-4, M-1..M-4).
 
 Nə var:
-- `AgentGateway` (etibarlı server tərəfi): işçi prosesi (`runtime/agent_worker.py`) boş mühit/boş iş qovluğu/irsi iki fd ilə başladır; (root isə) uid/gid endirir
-  (`require_os_drop=True` olduqda endirmə mümkün deyilsə sessiyanı AÇMIR: qapalı qalır), şəbəkə namespace-i cəhd edir, NO_NEW_PRIVS/DUMPABLE=0/rlimit tətbiq edir;
-  serverin özü `PR_SET_DUMPABLE=0` edir (eyni-uid proseslərin `/proc/<pid>/mem`/ptrace ilə oxumasına qarşı).
-- RPC: yalnız `hello`, `info`, `request_permission`, `handoff`. Agent id sessiyaya SERVER tərəfindən bağlanır (müştəri göndərə bilmir). Hər sorğu: çərçivə HMAC + sıra nömrəsi,
-  əməliyyat allowlist-i, ciddi arqument sxemi, agent hələ `active`-dirmi, sorğu limiti. Pozuntu (naməlum əməliyyat, pis çərçivə, limit) -> sessiya öldürülür.
-- Nəticə yalnız JSON proyeksiyadır; heç bir obyekt/istinad (fabrik, Company, Keyring, DB bağlantısı, imza obyekti) sərhədi keçmir.
+- `AgentGateway` (etibarlı server tərəfi): işçi prosesi (`runtime/agent_worker.py`) boş mühit/boş iş qovluğu/irsi iki fd ilə başladır. Server root-dursa HƏR SESSİYAYA unikal uid/gid verilir
+  (`uid_pool`); beləliklə sessiyalar bir-birini siqnal/ptrace/fayl ilə əlçatan ola bilmir və sessiya bitəndə həmin uid-nin BÜTÜN prosesləri (fork/setsid qaçışı daxil) öldürülür.
+- İzolyasiya xassələri işçinin iddiasına DEYİL, serverin `/proc` yoxlamasına əsaslanır: uid/gid, boş qrup, sıfır capability, NoNewPrivs, seccomp filtri, şəbəkə namespace-i
+  (serverinkindən fərqli inode + yalnız `lo`), dumpable=0 (proc qeydi root-a məxsus), rlimit-lər. Hər hansı tələb olunan xassə təsdiqlənmirsə agent kodu HEÇ VAXT işə düşmür (hello cavabsız, proses öldürülür).
+- RPC: yalnız `hello`, `info`, `request_permission`, `handoff`. Agent id sessiyaya SERVER tərəfindən bağlanır. Çərçivə HMAC + sıra nömrəsi + ölçü və iç-içəlik limiti (ayrışdırmadan əvvəl).
+- Giriş/çıxış tamamilə qeyri-bloklayıcıdır (`selectors`, yazma buferi limitli); hər `pump()` çağırışı ödəniş müddətlərini tətbiq edir; proses təmizliyi `pump()`-ı bloklamır.
 
-Nə YOXDUR (dürüst məhdudiyyətlər): tam OS sandbox DEYİL. Fayl sistemi qoruması yalnız uid endirmə + serverin 0700/0600 icazələri qədərdir; sistem çağırışı filtri (seccomp), mount/pid
-namespace, cgroup yoxdur (operator konteyner/bwrap ilə əlavə etməlidir). `drop` olmadan (root olmayan mühit) agent EYNİ istifadəçidir və DB fayllarını oxuya/yaza bilər.
+Nə YOXDUR (dürüst məhdudiyyətlər): tam OS sandbox DEYİL. Mount/PID namespace, cgroup, fayl sistemi pivot_root YOXDUR: agent dünyaca oxunan yollara çata bilir. seccomp yalnız x86_64-də (başqa arxitekturada
+`require_seccomp=True` ilə sessiya açılmır). `allow_insecure_same_uid=True` rejimi (root olmayan server) HEÇ BİR təhlükəsizlik sərhədi DEYİL: agent serverlə EYNİ istifadəçidir (onu öldürə, DB fayllarını
+oxuya/yaza, şəbəkəyə çıxa bilər); defolt olaraq BAĞLIDIR və nəticədə `security_boundary=False` göstərilir.
 Server bir-iplikli sorğu emalı edir (`pump()` DB bağlantılarını yaradan iplikdən çağırılmalıdır).
 """
 from __future__ import annotations
@@ -18,8 +19,9 @@ import ctypes
 import json
 import math
 import os
+import pwd
 import re
-import select
+import selectors
 import shutil
 import signal
 import socket
@@ -27,21 +29,25 @@ import subprocess
 import sys
 import tempfile
 import time
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from runtime import agent_wire
 from agents.agent_factory import FactoryDenied
+from runtime import agent_wire
 
 ALLOWED_OPS = ("hello", "info", "request_permission", "handoff")
+DEFAULT_UID_POOL = (62000, 62256)       # NAYMERA-ya AYRILMIŞ uid aralığı [başlanğıc, son): sessiya başına bir uid/gid; passwd-da olan və ya başqa proses işlədən uid-lər atlanır
+DEFAULT_LIMITS = {"nofile": 64, "cpu_s": 60, "fsize": 10 * 1024 * 1024, "as_bytes": 1024 * 1024 * 1024, "nproc": 32}
+CLOSE_GRACE_S = 10.0
+EOF_GRACE_S = 2.0              # soket bağlandıqdan sonra proses təbii çıxsın deyə qısa möhlət; sonra öldürülür
 _PROGRAM_RE = re.compile(r"^[A-Za-z0-9_\-]{1,60}\.py$")
 _ID_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,80}$")
 _PERM_RE = re.compile(r"^[a-z_]{1,40}$")
 _WORKER = Path(__file__).resolve().parent / "agent_worker.py"
 _WIRE = Path(__file__).resolve().parent / "agent_wire.py"
 _OUT_CAP = 16 * 1024
-NOBODY = (65534, 65534)
 
 
 class IsolationError(RuntimeError):
@@ -56,13 +62,16 @@ class _BadArgs(ValueError):
 class SessionResult:
     agent_id: str
     exit_code: int | None
-    stdout: str
+    stdout: str                  # ETİBARSIZ mətn (agent yazıb)
     stderr: str
     calls: dict
     denied: tuple
     violations: int
     killed: str
-    isolation: dict
+    isolation: dict              # SERVER tərəfindən /proc ilə yoxlanmış xassələr (işçinin iddiası deyil)
+    security_boundary: bool      # yalnız izolasiya rejimində və bütün tələb olunan xassələr təsdiqlənibsə True
+    survivors_killed: int        # sessiya bitəndən sonra öldürülən qalıq proseslər (fork/setsid cəhdləri)
+    reported: dict = field(default_factory=dict)   # işçinin öz bayraqları: yalnız diaqnostika, etibar olunmur
 
 
 @dataclass
@@ -77,7 +86,10 @@ class _Session:
     out: Any
     err: Any
     deadline: float
-    expect_uid: int | None
+    uid: int | None
+    gid: int | None
+    mode: str
+    limits: dict
     hello: bool = False
     requests: int = 0
     violations: int = 0
@@ -85,6 +97,13 @@ class _Session:
     denied: list = field(default_factory=list)
     killed: str = ""
     isolation: dict = field(default_factory=dict)
+    reported: dict = field(default_factory=dict)
+    boundary: bool = False
+    outbuf: bytearray = field(default_factory=bytearray)
+    closing: bool = False
+    close_started: float = 0.0
+    eof_at: float = 0.0
+    survivors: set = field(default_factory=set)
     done: bool = False
     result: SessionResult | None = None
 
@@ -95,6 +114,56 @@ def harden_server_process() -> bool:
         return ctypes.CDLL(None, use_errno=True).prctl(4, 0, 0, 0, 0) == 0
     except Exception:  # noqa: BLE001
         return False
+
+
+# --- /proc yardımçıları (server tərəfdən müstəqil yoxlama) ---
+
+def _proc_status(pid: int) -> dict[str, str] | None:
+    try:
+        out = {}
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            k, _, v = line.partition(":")
+            out[k] = v.strip()
+        return out
+    except (OSError, ValueError):
+        return None
+
+
+def _uid_procs(uid: int, exclude: int = 0, zombies: bool = False) -> list[int]:
+    """Real uid-i `uid` olan bütün proseslər (`/proc` skanı; dumpable=0 proseslərin `/proc/<pid>` sahibi root olduğu üçün `status` oxunur)."""
+    found = []
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return found
+    for n in names:
+        if not n.isdigit() or int(n) == exclude:
+            continue
+        st = _proc_status(int(n))
+        if st and st.get("Uid", "").split()[:1] == [str(uid)] and (zombies or not st.get("State", "").startswith("Z")):   # zombi (ölü, init-in götürməsini gözləyən) sağ qalan sayılmır
+            found.append(int(n))
+    return found
+
+
+def _parse_limits(pid: int) -> dict[str, tuple[str, str]]:
+    out: dict[str, tuple[str, str]] = {}
+    try:
+        for line in Path(f"/proc/{pid}/limits").read_text().splitlines()[1:]:
+            m = re.match(r"^(Max [a-z ]+?)\s{2,}(\S+)\s+(\S+)", line)
+            if m:
+                out[m.group(1).strip()] = (m.group(2), m.group(3))
+    except OSError:
+        pass
+    return out
+
+
+def _lim_ok(pair: tuple[str, str] | None, cap: int) -> bool:
+    if pair is None:
+        return False
+    try:
+        return int(pair[0]) <= cap and int(pair[1]) <= cap
+    except ValueError:
+        return False            # "unlimited"
 
 
 def _text(args: dict, key: str, max_len: int, *, regex: re.Pattern | None = None, optional: bool = False, default: str = "") -> str:
@@ -158,24 +227,76 @@ _HANDLERS: dict[str, Callable[["AgentGateway", _Session, dict], dict]] = {"info"
 
 class AgentGateway:
     def __init__(self, ports_for: Callable[[str], Any], status_of: Callable[[str], str | None], *, program_root: str | Path,
-                 python: str | None = None, drop_to: tuple[int, int] | None = NOBODY, require_os_drop: bool = True, net_isolate: bool = True,
-                 harden_server: bool = True, limits: dict | None = None, max_sessions: int = 4, max_requests: int = 200, max_violations: int = 3,
-                 clock: Callable[[], float] = time.monotonic) -> None:
-        """`ports_for(agent_id)` ve `status_of(agent_id)` etibarlı bootstrap-ın verdiyi funksiyalardır (bağlı metod DEYİL: fabrikə istinad sərhədi keçmir).
-        `require_os_drop=True` (defolt): uid endirmə mümkün deyilsə (root olmayan server) HEÇ BİR sessiya açılmır."""
+                 python: str | None = None, uid_pool: tuple[int, int] | None = DEFAULT_UID_POOL, allow_insecure_same_uid: bool = False,
+                 require_net_isolation: bool = True, require_seccomp: bool = True, harden_server: bool = True, limits: dict | None = None,
+                 max_sessions: int = 4, max_requests: int = 200, max_violations: int = 3, max_outbuf: int = 128 * 1024,
+                 clock: Callable[[], float] = time.monotonic, tmp_dir: str | Path | None = None) -> None:
+        """`ports_for(agent_id)` və `status_of(agent_id)` etibarlı bootstrap-ın verdiyi funksiyalardır (bağlı metod DEYİL).
+        İzolyasiya rejimi: server root + `uid_pool`. Əks halda sessiya AÇILMIR (qapalı qalır), YALNIZ `allow_insecure_same_uid=True` açıq seçilməsə:
+        onda agent serverlə EYNİ uid-də işləyir, bu TƏHLÜKƏSİZLİK SƏRHƏDİ DEYİL və nəticədə `security_boundary=False` olur."""
         self._ports_for, self._status_of = ports_for, status_of
         self._root = Path(program_root).resolve()
         self._python = python or sys.executable
-        self._drop_to, self._require_drop, self._net_isolate = drop_to, bool(require_os_drop), bool(net_isolate)
-        self._limits = dict(limits or {})
-        self._max_sessions, self._max_requests, self._max_violations, self._clock = max_sessions, max_requests, max_violations, clock
+        self._uid_pool = uid_pool
+        self._insecure, self._req_net, self._req_seccomp = bool(allow_insecure_same_uid), bool(require_net_isolation), bool(require_seccomp)
+        self._limits = {**DEFAULT_LIMITS, **(limits or {})}
+        self._max_sessions, self._max_requests, self._max_violations, self._max_outbuf, self._clock = max_sessions, max_requests, max_violations, max_outbuf, clock
         self._sessions: dict[str, _Session] = {}
+        self._used_uids: set[int] = set()
+        self._quarantine: set[int] = set()
+        self._sel = selectors.DefaultSelector()
         self.server_dumpable_off = harden_server_process() if harden_server else False
+        base_dir = Path(tmp_dir) if tmp_dir is not None else Path(tempfile.gettempdir())
+        self._sweep_stale(base_dir)
+        self._base = Path(tempfile.mkdtemp(prefix=f"naymera-agents-{os.getpid()}-", dir=str(base_dir)))
+        os.chmod(self._base, 0o711)           # sessiya qovluqlarına yalnız dəqiq yolla girmək olar; siyahı almaq olmaz
+        weakref.finalize(self, shutil.rmtree, str(self._base), True)       # GC/proses çıxışında baza qovluğu silinir (close() çağırılmasa da)
+
+    # --- bərpa ---
+    @staticmethod
+    def _sweep_stale(base_dir: Path) -> None:
+        """Ölü server proseslərindən qalan sessiya baza qovluqlarını silir (`naymera-agents-<pid>-*`)."""
+        try:
+            for p in base_dir.glob("naymera-agents-*"):
+                m = re.match(r"^naymera-agents-(\d+)-", p.name)
+                if not m or int(m.group(1)) == os.getpid():
+                    continue
+                try:
+                    os.kill(int(m.group(1)), 0)
+                    continue                  # server hələ yaşayır
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    continue
+                shutil.rmtree(p, ignore_errors=True)
+        except OSError:
+            pass
+
+    # --- rejim və uid ---
+    def _mode(self) -> str:
+        if hasattr(os, "geteuid") and os.geteuid() == 0 and self._uid_pool is not None:
+            return "isolated"
+        if self._insecure:
+            return "insecure_same_uid"
+        raise IsolationError("izolyasiya təmin edilə bilmir (server root deyil və ya uid_pool yoxdur): sessiya açılmır. `allow_insecure_same_uid=True` TƏHLÜKƏSİZLİK SƏRHƏDİ DEYİL")
+
+    def _alloc_uid(self) -> int:
+        lo, hi = self._uid_pool  # type: ignore[misc]
+        for uid in range(lo, hi):
+            if uid in self._used_uids or uid in self._quarantine:
+                continue
+            try:
+                pwd.getpwuid(uid)
+                continue                      # sistem istifadəçisi
+            except KeyError:
+                pass
+            if _uid_procs(uid, zombies=True):
+                continue                      # başqa proses (və ya götürülməmiş zombi: RLIMIT_NPROC-u tutur) bu uid-i işlədir: toxunmuruq
+            self._used_uids.add(uid)
+            return uid
+        raise IsolationError("boş sessiya uid-i yoxdur (uid_pool tükənib və ya qalıq proseslər var)")
 
     # --- yaşam dövrü ---
-    def _can_drop(self) -> bool:
-        return self._drop_to is not None and hasattr(os, "geteuid") and os.geteuid() == 0
-
     def open_session(self, agent_id: str, program: str, *, args: Sequence[str] = (), timeout_s: float = 30.0) -> str:
         if not isinstance(agent_id, str) or self._status_of(agent_id) != "active":
             raise IsolationError("agent aktiv deyil və ya tapılmadı")
@@ -186,48 +307,61 @@ class AgentGateway:
             raise IsolationError("proqram program_root daxilində adi fayl olmalıdır")
         if len([x for x in self._sessions.values() if not x.done]) >= self._max_sessions:
             raise IsolationError("açıq sessiya limiti")
-        drop = self._can_drop()
-        if self._require_drop and not drop:
-            raise IsolationError("uid endirmə mümkün deyil (server root deyil və ya drop_to yoxdur): izolyasiya təmin edilmədiyi üçün sessiya açılmır")
-        tmp = Path(tempfile.mkdtemp(prefix="naymera-agent-"))
+        mode = self._mode()
+        isolated = mode == "isolated"
+        uid = self._alloc_uid() if isolated else None
+        gid = uid
+        sid = os.urandom(8).hex()
+        sdir = self._base / sid
         sock_p = sock_c = None
         out = err = None
         try:
-            os.chmod(tmp, 0o755)
+            sdir.mkdir(mode=0o750)
+            if isolated:
+                os.chown(sdir, 0, gid)        # yalnız bu sessiyanın qrupu girə/oxuya bilər
             for p in (_WORKER, _WIRE):
-                shutil.copyfile(p, tmp / p.name)
-                os.chmod(tmp / p.name, 0o644)
-            shutil.copyfile(src, tmp / "program.py")
-            os.chmod(tmp / "program.py", 0o644)
-            work = tmp / "work"
+                shutil.copyfile(p, sdir / p.name)
+            shutil.copyfile(src, sdir / "program.py")
+            for f in ("agent_worker.py", "agent_wire.py", "program.py"):
+                os.chmod(sdir / f, 0o640)
+                if isolated:
+                    os.chown(sdir / f, 0, gid)
+            work = sdir / "work"
             work.mkdir(mode=0o700)
-            if drop:
-                os.chown(work, self._drop_to[0], self._drop_to[1])  # type: ignore[index]
+            if isolated:
+                os.chown(work, uid, gid)
             key = os.urandom(32)
             sock_p, sock_c = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
             kr, kw = os.pipe()
             os.write(kw, key)
             os.close(kw)
             out, err = tempfile.TemporaryFile(), tempfile.TemporaryFile()
-            opts = {"args": [str(a)[:200] for a in args][:16], "workdir": str(work), "limits": self._limits, "net_isolate": self._net_isolate,
-                    "uid": self._drop_to[0] if drop else None, "gid": self._drop_to[1] if drop else None}  # type: ignore[index]
-            proc = subprocess.Popen([self._python, "-I", "-S", "-B", str(tmp / "agent_worker.py"), str(sock_c.fileno()), str(kr), str(tmp / "program.py"),
-                                     json.dumps(opts)], pass_fds=(sock_c.fileno(), kr), close_fds=True, env={}, cwd=str(tmp), stdin=subprocess.DEVNULL,
+            lims = dict(self._limits)
+            if not isolated:
+                lims.pop("nproc", None)       # same-uid rejimində RLIMIT_NPROC bütün istifadəçinin proseslərini sayır: sessiyaya aid ola bilməz (yalnız unikal uid-də mənalıdır)
+            opts = {"args": [str(a)[:200] for a in args][:16], "workdir": str(work), "limits": lims, "net_isolate": bool(isolated and self._req_net),
+                    "seccomp": bool(self._req_seccomp or not isolated), "uid": uid, "gid": gid}
+            proc = subprocess.Popen([self._python, "-I", "-S", "-B", str(sdir / "agent_worker.py"), str(sock_c.fileno()), str(kr), str(sdir / "program.py"),
+                                     json.dumps(opts)], pass_fds=(sock_c.fileno(), kr), close_fds=True, env={}, cwd=str(sdir), stdin=subprocess.DEVNULL,
                                     stdout=out, stderr=err, start_new_session=True)
             os.close(kr)
             sock_c.close()
+            sock_c = None
+            sock_p.setblocking(False)
         except BaseException:
             for x in (sock_p, sock_c, out, err):
                 try:
                     x and x.close()
                 except Exception:  # noqa: BLE001
                     pass
-            shutil.rmtree(tmp, ignore_errors=True)
+            shutil.rmtree(sdir, ignore_errors=True)
+            if uid is not None:
+                self._used_uids.discard(uid)
             raise
-        sid = os.urandom(8).hex()
-        sock_p.setblocking(True)
-        self._sessions[sid] = _Session(sid, agent_id, proc, sock_p, agent_wire.Reader(key, agent_wire.C2S), agent_wire.Writer(key, agent_wire.S2C), tmp, out, err,
-                                       self._clock() + float(timeout_s), self._drop_to[0] if drop else None)  # type: ignore[index]
+        s = _Session(sid, agent_id, proc, sock_p, agent_wire.Reader(key, agent_wire.C2S), agent_wire.Writer(key, agent_wire.S2C), sdir, out, err,
+                     self._clock() + float(timeout_s), uid, gid, mode, lims)
+        self._sessions[sid] = s
+        self._sel.register(sock_p, selectors.EVENT_READ, s)
         return sid
 
     def run_session(self, agent_id: str, program: str, *, args: Sequence[str] = (), timeout_s: float = 30.0) -> SessionResult:
@@ -241,74 +375,132 @@ class AgentGateway:
         assert s.result is not None
         return s.result
 
-    def close_all(self) -> None:
+    def close_all(self, wait_s: float = 15.0) -> None:
+        """Bütün sessiyaları bağlayır (açıq teardown çağırışı; `pump()` özü heç vaxt bloklanmır)."""
         for s in list(self._sessions.values()):
-            if not s.done:
-                self._kill(s, "closed")
-                self._finalize(s)
+            self._begin_close(s, "closed")
+        end = time.monotonic() + wait_s
+        while any(not s.done for s in self._sessions.values()) and time.monotonic() < end:
+            self.pump(0.02)
 
-    # --- sorğu emalı (bir-iplikli) ---
+    def close(self) -> None:
+        self.close_all()
+        try:
+            self._sel.close()
+        except Exception:  # noqa: BLE001
+            pass
+        shutil.rmtree(self._base, ignore_errors=True)
+
+    # --- sorğu emalı (bir-iplikli, qeyri-bloklayıcı) ---
     def pump(self, timeout: float = 0.1) -> None:
-        live = {s.sock: s for s in self._sessions.values() if not s.done}
-        if live:
-            ready, _, _ = select.select(list(live), [], [], timeout)
-            for sock in ready:
-                s = live[sock]
-                try:
-                    data = sock.recv(65536)
-                except OSError:
-                    data = b""
-                if not data:
-                    s.proc.poll()
-                    self._finalize(s)
+        if any(not s.done and not s.closing and not s.eof_at for s in self._sessions.values()):
+            for key, mask in self._sel.select(max(0.0, timeout)):
+                s = key.data
+                if s.done or s.closing:
                     continue
-                self._feed(s, data)
+                if mask & selectors.EVENT_READ:
+                    self._on_readable(s)
+                if mask & selectors.EVENT_WRITE and not s.done and not s.closing:
+                    self._flush(s)
         else:
-            time.sleep(min(timeout, 0.01))
+            time.sleep(min(max(0.0, timeout), 0.01))
         now = self._clock()
-        for s in [x for x in self._sessions.values() if not x.done]:
-            if now > s.deadline:
-                self._kill(s, "timeout")
-                self._finalize(s)
-            elif s.proc.poll() is not None and not select.select([s.sock], [], [], 0)[0]:
-                self._finalize(s)
+        for s in list(self._sessions.values()):
+            if s.done:
+                continue
+            if not s.closing and not s.eof_at and s.proc.poll() is not None:
+                for _ in range(16):                  # işçi çıxdı, lakin uşaq proseslər soketi açıq saxlaya bilər: qalıq çərçivələri boşalt, sonra bağla
+                    if s.closing or not self._on_readable(s):
+                        break
+                if not s.closing and not s.eof_at:
+                    self._begin_close(s, "")
+            if s.eof_at and not s.closing:
+                if s.proc.poll() is not None:
+                    self._begin_close(s, "")
+                elif now - s.eof_at > EOF_GRACE_S:
+                    self._begin_close(s, "socket_closed")
+            if not s.closing and now > s.deadline:
+                self._begin_close(s, "timeout")
+            if s.closing:
+                self._progress_close(s, now)
 
-    def _feed(self, s: _Session, data: bytes) -> None:
+    def _on_readable(self, s: _Session) -> bool:
+        """Oxunan bayt olubsa True (qalıq çərçivələri boşaltmaq üçün)."""
+        try:
+            data = s.sock.recv(65536)
+        except BlockingIOError:
+            return False
+        except OSError:
+            data = b""
+        if not data:
+            if not s.eof_at:                   # agent çıxdı/soketi bağladı: qısa möhlət, sonra (lazım olsa) öldürülür; qalıq proseslər HƏR HALDA təmizlənir
+                s.eof_at = self._clock()
+                try:
+                    self._sel.unregister(s.sock)
+                except (KeyError, ValueError, OSError):
+                    pass
+            return False
         try:
             msgs = s.reader.feed(data)
         except agent_wire.WireError as exc:
-            self._kill(s, f"wire:{exc.code}")
-            self._finalize(s)
-            return
+            self._begin_close(s, f"wire:{exc.code}")
+            return True
+        except Exception:  # noqa: BLE001 — gözlənilməz ayrışdırma xətası serveri çökdürməməlidir
+            self._begin_close(s, "wire:internal")
+            return True
         for msg in msgs:
-            if s.done:
+            if s.done or s.closing:
                 break
-            self._dispatch(s, msg)
+            try:
+                self._dispatch(s, msg)
+            except Exception:  # noqa: BLE001
+                self._begin_close(s, "internal_error")
+                break
+        return True
 
+    # --- yazma (limitli, qeyri-bloklayıcı) ---
     def _reply(self, s: _Session, mid: Any, ok: bool, payload: dict) -> None:
         body = {"id": mid, "ok": ok, ("result" if ok else "error"): payload}
         try:
-            s.sock.sendall(s.writer.pack(body))
-        except (OSError, agent_wire.WireError):
-            self._kill(s, "reply_failed")
+            frame = s.writer.pack(body)
+        except agent_wire.WireError:
+            self._begin_close(s, "reply_too_large")
+            return
+        if len(s.outbuf) + len(frame) > self._max_outbuf:
+            self._begin_close(s, "backpressure")      # agent cavabları oxumur: yığılma limitini aşdı
+            return
+        s.outbuf += frame
+        self._flush(s)
+
+    def _flush(self, s: _Session) -> None:
+        while s.outbuf:
+            try:
+                n = s.sock.send(s.outbuf)
+            except BlockingIOError:
+                break
+            except OSError:
+                self._begin_close(s, "reply_failed")
+                return
+            del s.outbuf[:n]
+        try:
+            self._sel.modify(s.sock, selectors.EVENT_READ | (selectors.EVENT_WRITE if s.outbuf else 0), s)
+        except (KeyError, ValueError, OSError):
+            pass
 
     def _violation(self, s: _Session, why: str) -> None:
         s.violations += 1
         if s.violations >= self._max_violations:
-            self._kill(s, f"violations:{why}")
-            self._finalize(s)
+            self._begin_close(s, f"violations:{why}")
 
     def _dispatch(self, s: _Session, msg: dict) -> None:
         mid, op, args = msg.get("id"), msg.get("op"), msg.get("args")
         if isinstance(mid, bool) or not isinstance(mid, int) or not isinstance(op, str) or not isinstance(args, dict) or set(msg) - {"id", "op", "args"}:
-            self._kill(s, "bad_request")
-            self._finalize(s)
+            self._begin_close(s, "bad_request")
             return
         s.requests += 1
         s.calls[op] = s.calls.get(op, 0) + 1
         if s.requests > self._max_requests:
-            self._kill(s, "rate_limit")
-            self._finalize(s)
+            self._begin_close(s, "rate_limit")
             return
         if op not in ALLOWED_OPS:
             s.denied.append((op, "unknown_op"))
@@ -318,15 +510,13 @@ class AgentGateway:
         if self._status_of(s.agent_id) != "active":
             s.denied.append((op, "agent_not_active"))
             self._reply(s, mid, False, {"code": "agent_not_active", "message": "agent aktiv deyil"})
-            self._kill(s, "agent_not_active")
-            self._finalize(s)
+            self._begin_close(s, "agent_not_active")
             return
         if op == "hello":
             self._hello(s, mid, args)
             return
         if not s.hello:
-            self._kill(s, "no_hello")
-            self._finalize(s)
+            self._begin_close(s, "no_hello")
             return
         try:
             self._reply(s, mid, True, _HANDLERS[op](self, s, args))
@@ -341,35 +531,61 @@ class AgentGateway:
             s.denied.append((op, "internal_error"))
             self._reply(s, mid, False, {"code": "internal_error", "message": "daxili xəta"})
 
+    # --- server tərəfli izolyasiya yoxlaması ---
+    def _verify(self, s: _Session) -> tuple[dict, list[str]]:
+        """Bütün xassələr `/proc`-dan SERVER tərəfindən oxunur (işçinin hello bayraqlarına baxılmır)."""
+        pid = s.proc.pid
+        v: dict[str, bool] = {}
+        st = _proc_status(pid) or {}
+        v["parent_is_server"] = st.get("PPid") == str(os.getpid())
+        ids = lambda k: st.get(k, "").split()  # noqa: E731
+        v["uid_unique"] = s.uid is not None and ids("Uid") == [str(s.uid)] * 4 and ids("Gid") == [str(s.gid)] * 4
+        v["groups_empty"] = st.get("Groups", "x").strip() == ""
+        v["caps_zero"] = all(st.get(k, "1").strip("0") == "" for k in ("CapInh", "CapPrm", "CapEff", "CapAmb"))
+        v["no_new_privs"] = st.get("NoNewPrivs") == "1"
+        v["seccomp_filter"] = st.get("Seccomp") == "2"
+        try:
+            mine, theirs = os.readlink("/proc/self/ns/net"), os.readlink(f"/proc/{pid}/ns/net")
+            ifaces = [ln.split(":")[0].strip() for ln in Path(f"/proc/{pid}/net/dev").read_text().splitlines()[2:] if ":" in ln]
+            v["network_namespace"] = theirs != mine and set(ifaces) <= {"lo"}
+        except OSError:
+            v["network_namespace"] = False
+        try:
+            v["dumpable_off"] = os.stat(f"/proc/{pid}/environ").st_uid == 0   # dumpable=0 prosesin `environ` və s. fayllarının sahibi root olur (qovluğun özünün yox)
+        except OSError:
+            v["dumpable_off"] = False
+        lim = _parse_limits(pid)
+        L = s.limits
+        v["rlimits"] = (lim.get("Max core file size") in (("0", "0"),) and _lim_ok(lim.get("Max open files"), int(L["nofile"])) and _lim_ok(lim.get("Max cpu time"), int(L["cpu_s"]))
+                        and _lim_ok(lim.get("Max file size"), int(L["fsize"])) and _lim_ok(lim.get("Max address space"), int(L["as_bytes"]))
+                        and (s.mode != "isolated" or _lim_ok(lim.get("Max processes"), int(L["nproc"]))))
+        v["filesystem_isolated"] = False        # mount namespace/pivot_root YOXDUR (sənədləşdirilib)
+        v["pid_namespace"] = False
+        required: list[str] = []
+        if s.mode == "isolated":
+            required = ["parent_is_server", "uid_unique", "groups_empty", "caps_zero", "no_new_privs", "dumpable_off", "rlimits"]
+            if self._req_net:
+                required.append("network_namespace")
+            if self._req_seccomp:
+                required.append("seccomp_filter")
+        return v, [k for k in required if not v.get(k)]
+
     def _hello(self, s: _Session, mid: Any, args: dict) -> None:
         if s.hello or args.get("proto") != agent_wire.PROTO or not isinstance(args.get("isolation"), dict):
-            self._kill(s, "bad_hello")
-            self._finalize(s)
+            self._begin_close(s, "bad_hello")
             return
-        reported = {k: bool(v) for k, v in args["isolation"].items() if k in ("uid_dropped", "network_namespace", "no_new_privs", "dumpable_off", "rlimits",
-                                                                              "filesystem_isolated")}
-        uid_ok = self._proc_uid(s.proc.pid)
-        if s.expect_uid is not None and (uid_ok != s.expect_uid or not reported.get("uid_dropped")):   # serverin müstəqil yoxlaması (/proc), işçinin iddiası kifayət deyil
-            self._kill(s, "isolation_mismatch")
-            self._finalize(s)
+        s.reported = {k: bool(x) for k, x in args["isolation"].items() if isinstance(k, str) and len(k) < 40}
+        verified, failed = self._verify(s)
+        s.isolation = verified
+        if failed:                                   # cavab VERİLMİR: işçi hello-da gözləyir, agent kodu heç vaxt başlamır
+            self._begin_close(s, "isolation_unverified:" + ",".join(failed))
             return
-        reported["server_verified_uid"] = uid_ok is not None and s.expect_uid is not None and uid_ok == s.expect_uid
-        s.isolation, s.hello = reported, True
+        s.boundary = s.mode == "isolated"
+        s.hello = True
         self._reply(s, mid, True, {"proto": agent_wire.PROTO})
 
-    @staticmethod
-    def _proc_uid(pid: int) -> int | None:
-        try:
-            for line in Path(f"/proc/{pid}/status").read_text().splitlines():
-                if line.startswith("Uid:"):
-                    real, eff, saved, fs = (int(x) for x in line.split()[1:5])
-                    return real if real == eff == saved == fs else None
-        except (OSError, ValueError):
-            return None
-        return None
-
-    def _kill(self, s: _Session, why: str) -> None:
-        s.killed = s.killed or why
+    # --- bağlama (bloklamayan) ---
+    def _kill_tree(self, s: _Session) -> None:
         try:
             os.killpg(s.proc.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
@@ -377,15 +593,48 @@ class AgentGateway:
                 s.proc.kill()
             except Exception:  # noqa: BLE001
                 pass
+        if s.uid is not None:
+            for pid in (p for p in _uid_procs(s.uid) if p != s.proc.pid):
+                s.survivors.add(pid)
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
 
-    def _finalize(self, s: _Session) -> None:
-        if s.done:
+    def _begin_close(self, s: _Session, why: str) -> None:
+        if s.closing or s.done:
             return
+        if not why and s.proc.poll() is None:
+            why = "socket_closed"
+        s.killed = s.killed or why
+        s.closing = True
+        s.close_started = self._clock()
         try:
-            s.proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self._kill(s, "wait_timeout")
-            s.proc.wait()
+            self._sel.unregister(s.sock)
+        except (KeyError, ValueError, OSError):
+            pass
+        self._kill_tree(s)
+
+    def _progress_close(self, s: _Session, now: float) -> None:
+        rc = s.proc.poll()
+        left = [p for p in _uid_procs(s.uid) if p != s.proc.pid] if s.uid is not None else []
+        for pid in left:
+            s.survivors.add(pid)
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if rc is None:
+            try:
+                os.killpg(s.proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if rc is not None and not left:
+            self._complete(s, clean=True)
+        elif now - s.close_started > CLOSE_GRACE_S:
+            self._complete(s, clean=False)         # uid karantinaya alınır, pump bloklanmır
+
+    def _complete(self, s: _Session, clean: bool) -> None:
         out = err = ""
         for f, name in ((s.out, "out"), (s.err, "err")):
             try:
@@ -397,11 +646,23 @@ class AgentGateway:
                 out = text
             else:
                 err = text
-            f.close()
+            try:
+                f.close()
+            except Exception:  # noqa: BLE001
+                pass
         try:
             s.sock.close()
         except OSError:
             pass
         shutil.rmtree(s.tmp, ignore_errors=True)
+        if s.uid is not None:
+            self._used_uids.discard(s.uid)
+            if not clean:
+                self._quarantine.add(s.uid)
         s.done = True
-        s.result = SessionResult(s.agent_id, s.proc.returncode, out, err, dict(s.calls), tuple(s.denied), s.violations, s.killed, dict(s.isolation))
+        killed = s.killed
+        if not s.hello and not killed:                       # hello-ya çatmadan çıxdı (məs. tələb olunan şəbəkə izolyasiyası alınmadı): agent kodu işləməyib
+            killed = f"no_hello:exit={s.proc.returncode}"
+        killed += "" if clean else (";" if killed else "") + "cleanup_incomplete"
+        s.result = SessionResult(s.agent_id, s.proc.returncode, out, err, dict(s.calls), tuple(s.denied), s.violations, killed, dict(s.isolation),
+                                 bool(s.boundary and clean), len(s.survivors), dict(s.reported))

@@ -13,13 +13,15 @@ agentlərə baxan komponentlər (`AgentHandle`) imza obyektinə, `Company.admin`
 """
 from __future__ import annotations
 
+import secrets
 import time
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from agents.agent_factory import AgentFactory, FactoryPolicy, FactoryView
-from runtime.agent_gateway import AgentGateway, NOBODY
+from runtime.agent_gateway import DEFAULT_UID_POOL, AgentGateway
 from agents.agent_runtime import AgentDispatcher, AgentLLMRunner
 from agents.company import Company
 from agents.factory_auth import CredentialError, Keyring, TrustedSigner, decode_public_key, decode_signing_seed, valid_key_id
@@ -77,25 +79,67 @@ def load_signing_config(env: Mapping[str, str]) -> SigningConfig | None:
     return SigningConfig(key_id, seed, retired, revoked_ids)
 
 
-_CONSOLE_OPS = ("spawn", "assign", "cancel_task", "stop", "restart", "archive", "create_agent", "grant", "set_budget", "set_policy", "resolve_request", "delete")
+CONSOLE_OPS = ("spawn", "assign", "cancel_task", "stop", "restart", "archive", "create_agent", "grant", "set_budget", "set_policy", "resolve_request", "delete")
+_BACKENDS: dict[str, Any] = {}      # modul-səviyyəli reyestr: OwnerConsole obyektində, onun funksiya default/closure/atributlarında fabrikə istinad YOXDUR
 
 
 class OwnerConsole:
-    """Sahib tərəfli əməliyyatların dar səthi (etibarlı server kodu üçün). Hər əməliyyat imzalı etibarnamə tələb edir; `FactoryAdmin/Control/Runtime` və ya `AgentFactory`
-    obyekti/bağlı metodu bu səthdə YOXDUR (yalnız eyni adlı sarğı funksiyalar). Agent kodu bu proseslə ümumiyyətlə eyni prosesdə deyil (`AgentGateway`)."""
-    __slots__ = _CONSOLE_OPS
+    """Sahib tərəfli əməliyyatların dar səthi (etibarlı server kodu üçün). Hər əməliyyat imzalı sahib etibarnaməsi tələb edir (fabrik/Company yoxlayır).
+    Obyektdə YALNIZ təsadüfi simvol açar (`_token`) var; `FactoryAdmin/Control`, `AgentFactory`, `Company`, bağlı metod, closure və ya default dəyər YOXDUR.
+    Çağırılan funksiya çağıran tərəfindən dəyişdirilə bilməz (`_fn=` kimi override yoxdur: əlavə açar söz fabrikin metoduna ötürülür və `TypeError` verir).
+    DÜRÜST QEYD: arxa uc modul reyestrində (`_BACKENDS`) saxlanır və eyni prosesdə ixtiyari kod `__globals__` ilə ona çata bilər; bu obyekt proses-daxili sərhəd DEYİL.
+    Agent kodu bu prosesdə işləmir (`AgentGateway`)."""
+    __slots__ = ("_token", "__weakref__")
 
     def __init__(self, admin: Any) -> None:
-        for name in _CONSOLE_OPS:
-            fn = getattr(admin, name)
-
-            def call(*a: Any, _fn: Callable[..., Any] = fn, **kw: Any) -> Any:
-                return _fn(*a, **kw)
-            call.__name__ = name
-            object.__setattr__(self, name, call)
+        token = secrets.token_hex(16)
+        _BACKENDS[token] = admin
+        object.__setattr__(self, "_token", token)
+        weakref.finalize(self, _BACKENDS.pop, token, None)
 
     def __setattr__(self, name: str, value: Any) -> None:
         raise AttributeError("dəyişdirilə bilməz")
+
+    def _call(self, name: str, a: tuple, kw: dict) -> Any:
+        if name not in CONSOLE_OPS:
+            raise AttributeError(name)
+        return getattr(_BACKENDS[self._token], name)(*a, **kw)
+
+    def spawn(self, *a: Any, **kw: Any) -> Any:
+        return self._call("spawn", a, kw)
+
+    def assign(self, *a: Any, **kw: Any) -> Any:
+        return self._call("assign", a, kw)
+
+    def cancel_task(self, *a: Any, **kw: Any) -> Any:
+        return self._call("cancel_task", a, kw)
+
+    def stop(self, *a: Any, **kw: Any) -> Any:
+        return self._call("stop", a, kw)
+
+    def restart(self, *a: Any, **kw: Any) -> Any:
+        return self._call("restart", a, kw)
+
+    def archive(self, *a: Any, **kw: Any) -> Any:
+        return self._call("archive", a, kw)
+
+    def create_agent(self, *a: Any, **kw: Any) -> Any:
+        return self._call("create_agent", a, kw)
+
+    def grant(self, *a: Any, **kw: Any) -> Any:
+        return self._call("grant", a, kw)
+
+    def set_budget(self, *a: Any, **kw: Any) -> Any:
+        return self._call("set_budget", a, kw)
+
+    def set_policy(self, *a: Any, **kw: Any) -> Any:
+        return self._call("set_policy", a, kw)
+
+    def resolve_request(self, *a: Any, **kw: Any) -> Any:
+        return self._call("resolve_request", a, kw)
+
+    def delete(self, *a: Any, **kw: Any) -> Any:
+        return self._call("delete", a, kw)
 
 
 @dataclass(frozen=True)
@@ -149,7 +193,7 @@ class TrustAnchor:
         gate = OwnerGate(auth, self._signer.owner_issuer(receipt_consumer(auth)))
         root = Path(program_root) if program_root is not None else Path(workspace_root) / "agent_programs"
         root.mkdir(parents=True, exist_ok=True)
-        iso = {"drop_to": NOBODY, "require_os_drop": True, **(agent_isolation or {})}   # defolt: uid endirmə MƏCBURİDİR (qapalı qalır)
+        iso = {"uid_pool": DEFAULT_UID_POOL, **(agent_isolation or {})}   # defolt: unikal uid + server-təsdiqli izolyasiya MƏCBURİDİR (qapalı qalır)
 
         def ports_for(agent_id: str) -> Any:
             return factory.handle(agent_id)

@@ -20,14 +20,14 @@ from agents.agent_factory import AgentFactory, FactoryAdmin, FactoryControl, Fac
 from runtime.agent_gateway import ALLOWED_OPS, AgentGateway, IsolationError
 from agents.factory_auth import CredentialError, Keyring, TrustedSigner, generate_signing_seed
 from api.bootstrap import build_app
-from runtime.factory_bootstrap import FactoryStack, OwnerConsole, TrustAnchor, load_signing_config
+from runtime.factory_bootstrap import CONSOLE_OPS, FactoryStack, OwnerConsole, TrustAnchor, load_signing_config
 from tests.test_api_auth import pair
 from tests.test_security_boundary import H, authenticate, reach
 from tests.test_agent_runtime import task, world  # noqa: F401  (fixture)
 
 IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 needs_root = pytest.mark.skipif(not IS_ROOT, reason="uid endirmə yalnız root mühitdə sınanır (root olmayanda agent eyni istifadəçidir)")
-SAME_UID = {"require_os_drop": False, "drop_to": None}
+SAME_UID = {"uid_pool": None, "allow_insecure_same_uid": True}          # AÇIQ seçim: unikal uid YOXDUR, TƏHLÜKƏSİZLİK SƏRHƏDİ DEYİL
 
 
 def make_prod(tmp_path, *, drop: bool):
@@ -57,14 +57,14 @@ def agent(p, role="programmer", **kw):
 def prod(tmp_path):
     p = make_prod(tmp_path, drop=False)
     yield p
-    p.stack.agents.close_all()
+    p.stack.agents.close()
 
 
 @pytest.fixture
 def prod_drop(tmp_path):
     p = make_prod(tmp_path, drop=True)
     yield p
-    p.stack.agents.close_all()
+    p.stack.agents.close()
 
 
 def out(res):
@@ -380,14 +380,15 @@ def test_timeout_kills_a_runaway_agent_process(prod):
 
 def test_default_gateway_fails_closed_without_os_level_uid_drop(tmp_path):
     called = []
-    gw = AgentGateway(lambda i: called.append(i), lambda i: "active", program_root=tmp_path, drop_to=None, harden_server=False)    # require_os_drop=True (defolt)
+    gw = AgentGateway(lambda i: called.append(i), lambda i: "active", program_root=tmp_path, uid_pool=None, harden_server=False)    # uid_pool yoxdur, same-uid seçilməyib
     (tmp_path / "x.py").write_text("def main(c):\n    pass\n")
     with pytest.raises(IsolationError):
         gw.open_session("agt_x", "x.py")
-    gw2 = AgentGateway(lambda i: None, lambda i: "active", program_root=tmp_path, harden_server=False)     # drop_to=NOBODY, lakin root olmayan server
+    gw2 = AgentGateway(lambda i: None, lambda i: "active", program_root=tmp_path, harden_server=False)     # defolt uid_pool, lakin root olmayan server
     if not IS_ROOT:
         with pytest.raises(IsolationError):
             gw2.open_session("agt_x", "x.py")
+    gw.close(); gw2.close()
     assert called == []
 
 
@@ -397,7 +398,7 @@ def test_production_bootstrap_default_requires_the_os_drop(tmp_path):
     code = program(p, "d.py", "def main(c):\n    pass\n")
     if IS_ROOT:
         res = p.stack.agents.run_session(a.agent_id, code, timeout_s=15)
-        assert res.exit_code == 0 and res.isolation["uid_dropped"] is True
+        assert res.exit_code == 0 and res.isolation["uid_unique"] is True and res.security_boundary is True
     else:
         with pytest.raises(IsolationError):
             p.stack.agents.open_session(a.agent_id, code)
@@ -454,7 +455,7 @@ def test_E1b_with_uid_drop_the_agent_cannot_read_or_tamper_with_server_databases
     before = p.svc.company.view.get(a.name).budget
     res = p.stack.agents.run_session(a.agent_id, program(p, "db.py", DBTAMPER), args=_dbs(p), timeout_s=20)
     r = out(res)
-    assert res.isolation["uid_dropped"] is True and res.isolation["server_verified_uid"] is True
+    assert res.isolation["uid_unique"] is True and res.security_boundary is True
     for name, x in r.items():
         assert x["read"] == "PermissionError" and x["sql_write"] != "OK", (name, x)
     assert p.svc.company.view.get(a.name).budget == before
@@ -463,11 +464,11 @@ def test_E1b_with_uid_drop_the_agent_cannot_read_or_tamper_with_server_databases
 
 def test_same_uid_mode_has_NO_filesystem_isolation_documented_limitation(prod):
     """Dürüst məhdudiyyət: root olmayan (uid endirmə yox) rejimdə agent serverlə EYNİ istifadəçidir və DB fayllarını oxuya/yaza bilər.
-    Bu rejim yalnız `require_os_drop=False` ilə açıq şəkildə seçilir; istehsal defoltu belə sessiya açmır."""
+    Bu rejim yalnız `allow_insecure_same_uid=True` ilə açıq şəkildə seçilir; istehsal defoltu belə sessiya açmır."""
     a = agent(prod)
     res = prod.stack.agents.run_session(a.agent_id, program(prod, "db.py", DBTAMPER), args=[str(prod.svc.data_dir / "company.db")], timeout_s=20)
     r = out(res)
-    assert res.isolation["uid_dropped"] is False and res.isolation["server_verified_uid"] is False and res.isolation["filesystem_isolated"] is False
+    assert res.isolation["uid_unique"] is False and res.isolation["filesystem_isolated"] is False and res.security_boundary is False
     assert r["company.db"]["sql_write"] == "OK"                 # sənədləşdirilmiş zəiflik: bu rejim sandbox SAYILMIR
     assert prod.svc.company.view.get(a.name).budget == 4.0
 
@@ -502,27 +503,40 @@ def main(c):
 '''
 
 
+def _netns_possible() -> bool:
+    """Bu mühitdə (root + CAP_SYS_ADMIN) şəbəkə namespace-i yaradıla bilirmi? (ayrıca prosesdə yoxlanır)"""
+    import subprocess
+    r = subprocess.run([sys.executable, "-c", "import os; os.unshare(os.CLONE_NEWNET)"], capture_output=True)
+    return r.returncode == 0
+
+
 @needs_root
-def test_E1_os_level_hardening_with_uid_drop(prod_drop):
+def test_E1_os_level_hardening_with_unique_uid_and_server_verified_isolation(prod_drop):
     p = prod_drop
     a = agent(p)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
     try:
-        res = p.stack.agents.run_session(a.agent_id, program(p, "esc.py", ESCALATE), args=[str(os.getpid()), str(listener.getsockname()[1])], timeout_s=20)
+        if _netns_possible():
+            res = p.stack.agents.run_session(a.agent_id, program(p, "esc.py", ESCALATE), args=[str(os.getpid()), str(listener.getsockname()[1])], timeout_s=20)
+            r = out(res)
+            lo, hi = p.stack.agents._uid_pool
+            assert lo <= r["uid"][0] < hi and r["uid"] == [r["uid"][0]] * 2 + [r["uid"][0]] and r["groups"] == [] and r["setuid0"] == "PermissionError"
+            assert r["server_mem"] == "PermissionError" and r["write_etc"] == "PermissionError"
+            assert p.stack.agents.server_dumpable_off is True
+            iso = res.isolation
+            assert res.security_boundary is True and res.killed == ""
+            for k in ("uid_unique", "groups_empty", "caps_zero", "no_new_privs", "dumpable_off", "rlimits", "network_namespace", "seccomp_filter"):
+                assert iso[k] is True, (k, iso)
+            assert iso["filesystem_isolated"] is False and iso["pid_namespace"] is False          # dürüst: bunlar YOXDUR
+            assert r["net"] != "CONNECTED"
+        else:
+            # mühit şəbəkə namespace-i yarada bilmir: təhlükəsizlik xassəsi təsdiqlənə bilmir -> sessiya QAPALI qalmalıdır (atlama YOX)
+            res = p.stack.agents.run_session(a.agent_id, program(p, "esc.py", ESCALATE), args=["1", "1"], timeout_s=20)
+            assert res.killed.startswith("isolation_unverified") and "network_namespace" in res.killed and res.stdout == "" and res.security_boundary is False
     finally:
         listener.close()
-    r = out(res)
-    assert r["uid"] == [65534, 65534, 65534] and r["groups"] == [] and r["setuid0"] == "PermissionError"
-    assert r["server_mem"] == "PermissionError" and r["write_etc"] == "PermissionError"
-    assert p.stack.agents.server_dumpable_off is True
-    iso = res.isolation
-    assert iso["uid_dropped"] and iso["no_new_privs"] and iso["dumpable_off"] and iso["rlimits"] and iso["filesystem_isolated"] is False
-    if iso["network_namespace"]:                                # yalnız namespace həqiqətən yaradılıbsa şəbəkə qapalıdır
-        assert r["net"] != "CONNECTED"
-    else:
-        pytest.skip("şəbəkə namespace-i bu mühitdə yaradıla bilmədi (dürüst hesabat: network_namespace=False)")
 
 
 # ----------------------------------------------------------------------------- Keyring (B-1 hissə 2)
@@ -593,9 +607,11 @@ def test_E2_no_bound_factory_method_or_privileged_facet_is_distributed(prod):
         assert not isinstance(v, (AgentFactory, FactoryAdmin, FactoryControl, FactoryRuntime)), f.name
     console = s.console
     assert isinstance(console, OwnerConsole)
-    for name in OwnerConsole.__slots__:
-        fn = getattr(console, name)
-        assert not hasattr(fn, "__self__") and fn.__name__ == name        # sarğı funksiyadır, FactoryAdmin-in bağlı metodu deyil
+    for name in CONSOLE_OPS:
+        bound = getattr(console, name)
+        assert bound.__self__ is console                                    # yalnız OwnerConsole-un özünün metodu; arxa uc obyektinə istinad yoxdur
+        fn = bound.__func__
+        assert fn.__defaults__ is None and fn.__kwdefaults__ is None and fn.__closure__ is None
     assert not any(hasattr(console, n) for n in ("admin", "control", "runtime", "_admin", "factory", "core"))
     with pytest.raises(AttributeError):
         console.create_agent = lambda *a, **k: None
