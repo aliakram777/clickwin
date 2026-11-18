@@ -5,12 +5,12 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from agents.ceo import CEO, RulePlanner
 from agents.company import Company
 from agents.durable import DurableRunner, WorkflowStore
-from agents.hybrid import AiStore, CloudEngine, HybridRouter, LocalEngine, RoutedLLM
+from agents.hybrid import AiStore, CloudEngine, HybridRouter, LocalEngine, MockLocalRuntime, PersonalServerRuntime, RoutedLLM
 from agents.llm import GuardedLLM, LLMConfig, MockProvider
 from agents.llm_planner import LLMPlanner
 from agents.memory import MemoryService
@@ -27,6 +27,7 @@ from api.jobs import JobService
 from safety.approvals import ApprovalService
 from runtime.brokered_llm import BrokeredRouter
 from runtime.factory_bootstrap import FactoryStack, TrustAnchor
+from agents.providers import OpenAICompatibleProvider, OpenAICompatLocalRuntime
 from safety.ledger import CostLedger, LedgerPort, LedgerReconciler, ledger_backend
 
 
@@ -49,33 +50,54 @@ class Services:
     ledger: CostLedger | None = None             # TƏK paylaşılan xərc kitabı (Broker, büdcə siyasəti, Cloud LLM, uzlaşdırma): etibarlı server kodu; ApiApp-a verilmir
 
 
-def _check_engine_ledgers(ledger: Any, *engines: Any) -> CostLedger | None:
-    """Real (mock olmayan) ödənişli mühərrik (`GuardedLLM` müştərisi olan) üçün: açıq `ledger=` TƏLƏB OLUNUR və mühərrikin kitabı EYNİ arxa uc kitab olmalıdır; əks halda `ValueError`
-    (build_app səssizcə ikinci kitab yaratmır: ümumi tavan və uzlaşdırma yan keçilməsin). Mock/qurulmayan mühərriklər üçün məhdudiyyət yoxdur. Yalnız `client` (GuardedLLM) bildirən
-    mühərriklər yoxlanıla bilir: başqa mühərrik növləri ödənişli yol kimi `runtime/production.build_production` ilə qurulmalıdır. Xam `CostLedger` qaytarır (verilməyibsə None)."""
+_LOCAL_RUNTIME_TYPES = (MockLocalRuntime, PersonalServerRuntime, OpenAICompatLocalRuntime)     # etibarlı LOKAL (ödənişli Cloud olmayan) icra mühitləri
+
+
+def _check_engines(ledger: Any, engines: Sequence[tuple[str, Any]], allow_unaudited: bool) -> CostLedger | None:
+    """FAIL-CLOSED mühərrik yoxlaması (ödənişli yolun bölünmüş kitab/yan keçid riskinə qarşı). Yalnız TAM tipi etibarlı olan mühərriklər qəbul olunur (alt siniflər/ördək tipli obyektlər YOX):
+    - `None`; `CloudEngine(None)` (qurulmayıb); `CloudEngine(GuardedLLM(MockProvider))` (mock: provayderin özü-bəyan etdiyi `is_mock` bayrağına GÜVƏNİLMİR, konkret tip yoxlanılır);
+    - `CloudEngine(GuardedLLM(OpenAICompatibleProvider))` real ödənişli: açıq `ledger=` TƏLƏB OLUNUR və mühərrikin kitabı EYNİ arxa uc olmalıdır;
+    - `LocalEngine(None | MockLocalRuntime | PersonalServerRuntime | OpenAICompatLocalRuntime)`.
+    Hər şey başqa (naməlum/ördək tipli mühərrik, GuardedLLM olmayan müştəri, naməlum provayder/icra mühiti) `ValueError`. `allow_unaudited` (yalnız TEST üçün, `build_app(allow_unaudited_engines=True)`)
+    yalnız naməlum mühərrik TİPLƏRİNƏ icazə verir; məlum tiplərin yoxlamaları həmişə tətbiq olunur. İstehsal yığılması (`runtime/production.py`, `tools/serve.py`) bu bayrağı HEÇ VAXT ötürmür (AST testi)."""
     raw = None
     if ledger is not None:
         raw = ledger_backend(ledger)
         if raw is None:
             raise ValueError("ledger CostLedger (və ya LedgerPort) olmalıdır")
-    for eng in engines:
-        client = getattr(eng, "client", None)
-        provider = getattr(client, "provider", None)
-        if client is None or provider is None or bool(getattr(provider, "is_mock", False)):
+    for label, eng in engines:
+        if eng is None:
             continue
-        if raw is None:
-            raise ValueError("real ödənişli mühərrik üçün açıq `ledger=` tələb olunur (build_app ikinci kitab yaratmır); `runtime.production.build_production` istifadə edin")
-        backend = ledger_backend(getattr(client, "ledger", None))
-        if backend is None:
-            raise ValueError("real ödənişli mühərrikin xərc kitabı yoxdur: ödənişli çağırış kitabsız qurula bilməz")
-        if backend is not raw:
-            raise ValueError("real ödənişli mühərrikin kitabı build_app kitabı ilə EYNİ deyil (bölünmüş kitab): bir paylaşılan CostLedger istifadə edin")
+        kind = type(eng)
+        if kind is CloudEngine:
+            client = eng.client
+            if client is None:
+                continue
+            if type(client) is not GuardedLLM:
+                raise ValueError(f"{label}: CloudEngine yalnız GuardedLLM müştərisini qəbul edir (naməlum müştəri tipi: {type(client).__name__})")
+            ptype = type(client.provider)
+            if ptype is MockProvider:
+                continue
+            if ptype is not OpenAICompatibleProvider:
+                raise ValueError(f"{label}: naməlum provayder tipi rədd edildi: {ptype.__name__} (özü-bəyan etdiyi is_mock bayrağına güvənilmir)")
+            if raw is None:
+                raise ValueError(f"{label}: real ödənişli mühərrik üçün açıq `ledger=` tələb olunur (build_app ikinci kitab yaratmır); `runtime.production.build_production` istifadə edin")
+            backend = ledger_backend(client.ledger)
+            if backend is None:
+                raise ValueError(f"{label}: real ödənişli mühərrikin xərc kitabı yoxdur: ödənişli çağırış kitabsız qurula bilməz")
+            if backend is not raw:
+                raise ValueError(f"{label}: real ödənişli mühərrikin kitabı build_app kitabı ilə EYNİ deyil (bölünmüş kitab): bir paylaşılan CostLedger istifadə edin")
+        elif kind is LocalEngine:
+            if eng.runtime is not None and type(eng.runtime) not in _LOCAL_RUNTIME_TYPES:
+                raise ValueError(f"{label}: naməlum lokal icra mühiti tipi rədd edildi: {type(eng.runtime).__name__}")
+        elif not allow_unaudited:
+            raise ValueError(f"{label}: naməlum mühərrik tipi ({kind.__name__}) rədd edildi: yalnız CloudEngine/LocalEngine (etibarlı müştəri/provayder/icra mühiti ilə) qəbul olunur")
     return raw
 
 
 def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: float = 0.0,
               https: bool = False, cloud_engine: Any = None, local_engine: Any = None, trust: TrustAnchor | None = None,
-              agent_isolation: dict | None = None, ledger: CostLedger | None = None) -> Services:
+              agent_isolation: dict | None = None, ledger: CostLedger | None = None, allow_unaudited_engines: bool = False) -> Services:
     """`ledger`: istehsalda Cloud mühərriki ilə PAYLAŞILAN tək kitab (`runtime/production.py`). Verilibsə onun ümumi tavanı `global_limit`-ə bərabər və doğrulayıcısı `trust.verifier` olmalıdır:
     əks halda ikinci/uyğunsuz kitab səssizcə qəbul olunmur (`ValueError`). Verilməyibsə `ledger.db` burada yaradılır."""
     d = Path(data_dir)
@@ -86,7 +108,7 @@ def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: fl
     company = Company(reg, d / "company.db", audit, owners={owner_id}, verifier=trust.verifier if trust is not None else None)
     events = EventStore(d / "events.db")
     verifier = trust.verifier if trust is not None else None
-    ledger = _check_engine_ledgers(ledger, cloud_engine, local_engine)
+    ledger = _check_engines(ledger, (('cloud_engine', cloud_engine), ('local_engine', local_engine)), allow_unaudited_engines)
     if ledger is None:
         ledger = CostLedger(d / "ledger.db", verifier=verifier, owners={owner_id}, global_limit=global_limit)
     else:

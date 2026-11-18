@@ -87,7 +87,7 @@ class SpyCloud(Fake):
 
 
 def _svc(tmp_path, cloud):
-    return build_app(tmp_path / "data", owner_id="owner", global_limit=5.0, cloud_engine=cloud, local_engine=Fake("local", state="not_configured"))
+    return build_app(tmp_path / "data", owner_id="owner", global_limit=5.0, cloud_engine=cloud, local_engine=Fake("local", state="not_configured"), allow_unaudited_engines=True)
 
 
 def test_production_chat_reaches_the_engine_only_inside_the_broker_with_an_audit_trail(tmp_path):

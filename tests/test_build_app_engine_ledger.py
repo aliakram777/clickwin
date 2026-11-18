@@ -65,7 +65,7 @@ def test_mock_and_not_configured_engines_need_no_ledger(tmp_path):
     mock = build_engines({"NAYMERA_CLOUD_PROVIDER": "mock"}, log_dir=tmp_path, stop_path=tmp_path / "STOP", ledger=None)
     assert mock.cloud.status().is_mock is True
     build_app(tmp_path / "d2", cloud_engine=mock.cloud, local_engine=mock.local)
-    build_app(tmp_path / "d3", cloud_engine=Fake("cloud", is_mock=True), local_engine=Fake("local", state="not_configured"))
+    build_app(tmp_path / "d3", cloud_engine=Fake("cloud", is_mock=True), local_engine=Fake("local", state="not_configured"), allow_unaudited_engines=True)     # test fake: yalnız açıq bayrakla
 
 
 def test_build_production_remains_the_working_canonical_path(tmp_path):

@@ -97,20 +97,40 @@ def resolution_scope(op_id: str, actual: float | None) -> tuple[str, str]:
 @dataclass(frozen=True)
 class Settlement:
     """`settle()` nəticəsi. `ok`: rezerv həll olundu (köhnə `commit()` bool müqaviləsi). Faktiki xərc HƏMİŞƏ dəqiq yazılır (kəsilmir/azaldılmır). `overrun`: faktiki - rezerv (>0 isə hesablama
-    rezervi aşıb); `over_cap`: yazıldıqdan sonra ümumi xərc tavanı aşıb; `breaker_tripped`: bu hesablama davamlı "tavan aşıldı" kəsicisini AÇDI."""
+    rezervi aşıb; DÜRÜST tokenizer fərqi ola bilər); `over_cap`: yazıldıqdan sonra ümumi xərc tavanı aşıb (yalnız bu halda MALİYYƏ kəsicisi açılır: `breaker_tripped`);
+    `ceiling_exceeded`: provayder bildirdiyi çıxış tokenləri elan olunmuş `max_output_tokens`-i aşıb (AYRI provayder təhlükəsizlik kəsicisi: `provider_breaker_tripped`)."""
     ok: bool
     reserved: float = 0.0
     actual: float = 0.0
     overrun: float = 0.0
     over_cap: bool = False
     breaker_tripped: bool = False
+    ceiling_exceeded: bool = False
+    provider_breaker_tripped: bool = False
 
     def __bool__(self) -> bool:
         return self.ok
 
     @property
-    def overran(self) -> bool:
-        return self.ok and (self.overrun > 0.0 or self.over_cap)
+    def blocking(self) -> bool:
+        """Çağıran nəticəni "uğur" kimi qəbul etməməlidir: tavan aşılıb və ya provayder çıxış tavanını pozub."""
+        return self.ok and (self.over_cap or self.ceiling_exceeded)
+
+    @property
+    def soft_overrun(self) -> bool:
+        """Faktiki xərc rezervi aşdı, lakin ümumi tavan qorunur və çıxış tavanı pozulmayıb: dəqiq yazılır, auditə düşür, KƏSİCİ AÇILMIR."""
+        return self.ok and self.overrun > 0.0 and not self.blocking
+
+    @property
+    def overran(self) -> bool:      # köhnə ad: indi yalnız `blocking`
+        return self.blocking
+
+
+def clear_provider_breaker_scope(provider: str, breaker_id: int) -> tuple[str, str]:
+    """Provayder təhlükəsizlik kəsicisini təmizləmək üçün DƏQİQ əhatə: `clear_provider_breaker` + `provider:<ad>:<kəsici id>`."""
+    subject = f"provider:{str(provider)[:64]}:{int(breaker_id)}"
+    body = json.dumps({"op": "clear_provider_breaker", "subject": subject, "params": {}}, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+    return subject, hashlib.sha256(body.encode("ascii")).hexdigest()
 
 
 def clear_breaker_scope(breaker_id: int) -> tuple[str, str]:
@@ -197,6 +217,7 @@ class CostLedger:
         group_prefix: str | None = None,
         group_limit: float | None = None,
         description: str = "",
+        provider: str | None = None,
     ) -> Reservation:
         """Limitləri yoxlayıb rezervi atomik tutur. Azad edilmiş `op_id` yenidən rezerv edilə bilər.
         `group_prefix` + `group_limit`: eyni prefiksli `op_id`-lərin (məs. `llm:`) ümumi xərc tavanı (agentdən asılı olmayaraq, eyni tranzaksiyada)."""
@@ -215,6 +236,10 @@ class CostLedger:
             tripped = self._breaker_row()
             if tripped is not None:      # davamlı kəsici: SIFIR xərcli rezervlər də daxil, HƏR yeni rezerv rədd edilir (yalnız sahib təmizləyir)
                 return Reservation("denied", f"xərc tavanı aşılıb (kəsici #{tripped['id']}, op={tripped['op_id']}): yeni rezerv sahib təmizləyənə qədər bağlıdır")
+            if provider is not None:     # provayder çıxış tavanını pozub: həmin provayder üçün HƏR yeni rezerv (sahib təmizləyənə qədər) rədd edilir
+                pb = self._provider_breaker_row(str(provider))
+                if pb is not None:
+                    return Reservation("denied", f"provayder təhlükəsizlik kəsicisi açıqdır (#{pb['id']}, {pb['provider']}: çıxış tavanı pozuldu): sahib təmizləyənə qədər bağlıdır")
             row = self._conn.execute("SELECT status FROM costs WHERE op_id = ?", (op_id,)).fetchone()
             if row is not None and row[0] != "released":
                 return Reservation("duplicate", f"təkrar əməliyyat: {op_id}")
@@ -255,9 +280,10 @@ class CostLedger:
         """Köhnə bool müqaviləsi: `settle(...).ok`. Faktiki xərc dəqiq yazılır; rezervi/tavanı aşma `settle` ilə eyni qaydada qeydə alınır və kəsici açılır."""
         return self.settle(op_id, actual).ok
 
-    def settle(self, op_id: str, actual: float) -> Settlement:
+    def settle(self, op_id: str, actual: float, *, provider: str | None = None, output_tokens: int | None = None, max_output_tokens: int | None = None) -> Settlement:
         """Faktiki (provayderin bildirdiyi) xərci DƏQİQ yazır (YALNIZ normal `reserved`-dən; naməlum rezervi təsdiqləməz). Hesablama və aşma yoxlaması BİR tranzaksiyadadır:
-        faktiki > rezerv və ya ümumi > tavan olarsa aşma məbləği audit cədvəlinə yazılır və davamlı kəsici açılır (sonrakı HƏR rezerv rədd edilir). Xərc heç vaxt kəsilmir/azaldılmır.
+        faktiki > rezerv audit cədvəlinə yazılır (tokenizer fərqi dürüst ola bilər: kəsici AÇILMIR); ümumi > tavan olarsa davamlı MALİYYƏ kəsicisi açılır (sonrakı HƏR rezerv rədd edilir).
+        `output_tokens` > `max_output_tokens` olarsa `output_ceiling_violation` auditə yazılır və AYRI provayder kəsicisi açılır (maliyyə kəsicisi yalnız tavan aşılarsa). Xərc heç vaxt kəsilmir/azaldılmır.
         DÜRÜST QEYD: artıq baş vermiş provayder xərcini heç bir tavan geri qaytara bilməz; kəsici yalnız SONRAKI ödənişli çağırışları dayandırır."""
         _check_amount("faktiki xərc", actual)
         actual = float(actual)
@@ -268,7 +294,18 @@ class CostLedger:
             reserved = float(row[0])
             self._conn.execute("UPDATE costs SET amount = ?, status = 'committed' WHERE op_id = ?", (actual, op_id))
             overrun, over_cap, tripped = self._guard_cap(op_id, reserved, actual)
-        return Settlement(True, reserved, actual, overrun, over_cap, tripped)
+            ceiling = output_tokens is not None and max_output_tokens is not None and int(output_tokens) > int(max_output_tokens)
+            ptripped = False
+            if ceiling:
+                pname = str(provider if provider is not None else "unknown")[:64]
+                data = {"provider": pname, "output_tokens": int(output_tokens), "max_output_tokens": int(max_output_tokens), "actual": actual, "reserved": reserved}
+                eid = self._event("output_ceiling_violation", op_id, data)
+                if self._provider_breaker_row(pname) is None:
+                    self._conn.execute("INSERT INTO ledger_meta (key, value) VALUES (?, ?)",
+                                       (f"provider_breaker:{pname}", json.dumps({"id": eid, "provider": pname, "op_id": op_id, **data, "ts": float(self._clock())})))
+                    self._event("provider_breaker_tripped", op_id, data)
+                    ptripped = True
+        return Settlement(True, reserved, actual, overrun, over_cap, tripped, ceiling, ptripped)
 
     def _guard_cap(self, op_id: str, reserved: float, actual: float) -> tuple[float, bool, bool]:
         """Tranzaksiya DAXİLİNDƏ çağırılır. `(aşma, tavan_aşıldı, kəsici_açıldı)`."""
@@ -280,8 +317,8 @@ class CostLedger:
         tripped = False
         if overrun > 0.0 or over_cap:
             data = {"reserved": reserved, "actual": actual, "overrun": overrun, "total": total, "cap": cap, "over_cap": over_cap}
-            self._event("overrun", op_id, data)
-            if self._breaker_row() is None:
+            self._event("overrun", op_id, data)                       # rezervi aşma HƏMİŞƏ auditə yazılır
+            if over_cap and self._breaker_row() is None:               # MALİYYƏ kəsicisi YALNIZ ümumi tavan aşılanda (dürüst tokenizer fərqi tavan daxilində kəsici açmır)
                 eid = self._event("breaker_tripped", op_id, data)
                 self._conn.execute("INSERT INTO ledger_meta (key, value) VALUES ('breaker', ?)", (json.dumps({"id": eid, "op_id": op_id, **data, "ts": float(self._clock())}),))
                 tripped = True
@@ -298,6 +335,38 @@ class CostLedger:
     def breaker(self) -> dict | None:
         """Açıq "tavan aşıldı" kəsicisi (id, op_id, rezerv, faktiki, aşma, ümumi, tavan, vaxt) və ya None."""
         return self._breaker_row()
+
+    def _provider_breaker_row(self, provider: str) -> dict | None:
+        row = self._conn.execute("SELECT value FROM ledger_meta WHERE key = ?", (f"provider_breaker:{provider}",)).fetchone()
+        return json.loads(row[0]) if row is not None else None
+
+    def provider_breaker(self, provider: str) -> dict | None:
+        """Provayderin açıq təhlükəsizlik kəsicisi (çıxış tavanı pozuntusu) və ya None."""
+        return self._provider_breaker_row(str(provider)[:64])
+
+    def provider_breakers(self) -> list[dict]:
+        rows = self._conn.execute("SELECT value FROM ledger_meta WHERE key LIKE 'provider_breaker:%' ORDER BY key").fetchall()
+        return [json.loads(r[0]) for r in rows]
+
+    def clear_provider_breaker(self, provider: str, approval: Any) -> bool:
+        """Provayder kəsicisini YALNIZ həmin kəsicinin id-sinə bağlı, bir-dəfəlik sahib step-up təsdiqi ilə təmizləyir (auditli). Kəsici yoxdursa/id fərqlidirsə False."""
+        provider = str(provider)[:64]
+        current = self._provider_breaker_row(provider)
+        if current is None:
+            return False
+        subject, digest = clear_provider_breaker_scope(provider, current["id"])
+        self._verify_owner(approval, "clear_provider_breaker", subject, digest)
+        with self._tx():
+            row = self._provider_breaker_row(provider)
+            if row is None or row["id"] != current["id"]:
+                return False
+            try:
+                self._conn.execute("INSERT INTO ledger_used_credentials (nonce, op_id, used_at) VALUES (?, ?, ?)", (approval.nonce, subject, float(self._clock())))
+            except sqlite3.IntegrityError:
+                raise ResolutionDenied("sahib təsdiqi artıq istifadə olunub (bir-dəfəlik)", "credential_replayed") from None
+            self._conn.execute("DELETE FROM ledger_meta WHERE key = ?", (f"provider_breaker:{provider}",))
+            self._event("provider_breaker_cleared", row["op_id"], {"breaker_id": row["id"], "provider": provider, "by": approval.id})
+        return True
 
     def events(self, limit: int = 100) -> list[dict]:
         """Audit hadisələri (overrun, breaker_tripped, breaker_cleared), köhnədən yeniyə."""
@@ -487,7 +556,7 @@ def reconcile(ledger: CostLedger, audit_path: str | Path) -> ReconcileReport:
 
 _PORT_BACKENDS: dict[str, "CostLedger"] = {}                 # modul reyestri: LedgerPort obyektində kitaba istinad YOXDUR
 _PORT_METHODS = ("reserve", "commit", "settle", "release", "mark_unknown", "has", "agent_total", "total", "reserved_total", "by_agent", "entries", "unknown_entries", "stale_reserved",
-                 "breaker", "events")        # `clear_breaker` (sahib təsdiqi), `record`, `expire_stale`, `resolve_unknown` YOXDUR
+                 "breaker", "events", "provider_breaker", "provider_breakers")        # `clear_breaker` (sahib təsdiqi), `record`, `expire_stale`, `resolve_unknown` YOXDUR
 
 
 class LedgerPort:
@@ -564,6 +633,18 @@ class LedgerReconciler:
 
     def clear_breaker(self, approval: Any) -> bool:
         return _RECONCILER_BACKENDS[self._token].clear_breaker(approval)
+
+    def provider_breakers(self) -> list[dict]:
+        return _RECONCILER_BACKENDS[self._token].provider_breakers()
+
+    def clear_provider_scope(self, provider: str) -> tuple[str, str]:
+        b = _RECONCILER_BACKENDS[self._token].provider_breaker(provider)
+        if b is None:
+            raise ValueError("bu provayder üçün açıq kəsici yoxdur")
+        return clear_provider_breaker_scope(provider, b["id"])
+
+    def clear_provider_breaker(self, provider: str, approval: Any) -> bool:
+        return _RECONCILER_BACKENDS[self._token].clear_provider_breaker(provider, approval)
 
 
 def log_denial(audit_path: str | Path, agent: str, permission: str, cost: float,
