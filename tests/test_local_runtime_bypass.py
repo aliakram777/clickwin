@@ -80,7 +80,7 @@ def test_the_enforcing_transport_refuses_public_hosts_for_private_and_local_host
     for kind, url in (("private", "https://api.openai.com/v1/chat/completions"), ("private", "https://8.8.8.8/x"), ("cloud", "http://127.0.0.1:11434/v1/chat/completions"),
                       ("cloud", "https://192.168.1.5/v1/chat/completions")):
         t = UrllibTransport(kind=kind)
-        t._opener.open = lambda *a, **k: (_ for _ in ()).throw(AssertionError("qoşulma cəhdi olmamalıdır"))      # şəbəkəyə çıxış YOXDUR
+        t._connect = lambda *a, **k: (_ for _ in ()).throw(AssertionError("qoşulma cəhdi olmamalıdır"))      # şəbəkəyə çıxış YOXDUR
         with pytest.raises(TransportError):
             t(HttpRequest("POST", url, {}, b"{}", 1.0))
     with pytest.raises(ValueError):

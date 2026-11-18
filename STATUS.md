@@ -114,6 +114,8 @@ Mərhələ 17 — Real AI runtime və avtonom agent fabrikası (məhdud agent ya
 
 - Mərhələ 17 / PR #27 — `private` endpoint yalnız həqiqətən lokal (ictimai DNS/IP, HTTPS ilə də, artıq `LocalEngine` olmur); provayder hər sorğuda, `UrllibTransport(kind=...)` hər sorğunun URL-ində endpoint siyasətini yenidən yoxlayır; `build_app` nəqliyyatlı `PersonalServerRuntime`-ı və qeydsiz nəqliyyatı rədd edir; `allow_unaudited_engines` parametri silindi (test-only dəqiq-tip reyestri, pytest-siz proses RuntimeError, AST testi). Testlər: `tests/test_local_runtime_bypass.py`. Qalan risklər: AGENT_FACTORY.md.
 
+- Mərhələ 17 / PR #28 — DNS çözümü + IP pinləmə: hər sorğuda hostname-in BÜTÜN A/AAAA nəticələri yoxlanılır (lokal: yalnız loopback/özəl; Cloud: yalnız ictimai unicast; qarışıq nəticə = rədd), bağlantı yoxlanmış IP literalına qurulur (rebinding/TOCTOU yoxdur), qoşulduqdan sonra qarşı tərəf yenidən yoxlanılır, TLS sertifikatı və SNI orijinal hostname ilə, redirect izlənmir, mühit proksiləri istifadə olunmur. Testlər: `tests/test_dns_pinning.py` (həqiqi loopback HTTP/HTTPS serverlər, DNS təqlidi, IPv4/IPv6).
+
 ## Növbəti addımlar (təsdiq gözləyir)
 - LLM əsaslı Planner (interfeys hazırdır, real API təsdiq tələb edir)
 - Asılılıq çıxışlarının növbəti addıma ötürülməsi, retry gözləməsi (backoff)
