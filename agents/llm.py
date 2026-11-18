@@ -29,6 +29,7 @@ from safety.execution_context import in_broker
 from safety.ledger import CostLedger
 
 DEFAULT_LLM_LOG = Path("logs/llm.jsonl")
+_INPUT_TOKEN_OVERHEAD = 64    # çat şablonu/sistem əlavələri üçün xərc rezervinə əlavə (token)
 REAL_PROVIDER_NAMES = frozenset({"openai", "anthropic"})
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_\-]{0,31}$")
 
@@ -57,6 +58,17 @@ class LLMBudgetExceeded(LLMError):
 
 class LLMBlocked(LLMError):
     code = "blocked"
+
+
+class LLMBudgetOverrun(LLMError):
+    """Çağırış UĞURLU oldu və HAQQI dəqiq yazıldı, lakin faktiki xərc rezervi və/və ya ümumi tavanı AŞDI (davamlı kəsici açıldı: sonrakı ödənişli çağırışlar bağlıdır).
+    Nəticə "büdcə daxilində uğur" kimi qaytarılmır: `result` (ödənilmiş cavab), `cost`, `reserved`, `overrun`, `over_cap` çağırana açıq verilir. Artıq baş vermiş xərc geri qaytarılmır."""
+    code = "budget_overrun"
+
+    def __init__(self, message: str, *, result: Any = None, cost: float = 0.0, reserved: float = 0.0, overrun: float = 0.0, over_cap: bool = False) -> None:
+        super().__init__(message)
+        self.result, self.cost, self.reserved, self.overrun, self.over_cap = result, cost, reserved, overrun, over_cap
+        self.charged = True
 
 
 class LLMTimeout(LLMError):
@@ -433,6 +445,7 @@ class GuardedLLM:
                 raise fail("rejected", LLMBadRequest("max_output_tokens müsbət tam ədəd olmalıdır"))
             cap = min(cap, max_output_tokens)
         est_in = estimate_tokens(system + prompt)
+        est_in_cost = len(system) + len(prompt) + _INPUT_TOKEN_OVERHEAD   # XƏRC rezervi üçün mühafizəkar yuxarı hədd: simvol başına 1 token + şablon əlavəsi (token büdcəsi aşağıdakı kimi qalır)
         reserve = est_in + cap
 
         with self._lock:  # token büdcəsi: icradan əvvəl rezerv
@@ -446,7 +459,7 @@ class GuardedLLM:
             self._release_tokens(reserve)  # agent əhatəsində real provayder: xərc kitabı olmadan agent büdcəsi yoxlana bilməz -> bağlıdır
             raise fail("budget_exceeded", LLMBudgetExceeded("agent xərc büdcəsi üçün xərc kitabı (ledger) tələb olunur"))
         if self.ledger is not None:  # xərc büdcəsi (davamlı)
-            est_cost = est_in * cfg.price_in_per_1k / 1000 + cap * cfg.price_out_per_1k / 1000
+            est_cost = est_in_cost * cfg.price_in_per_1k / 1000 + cap * cfg.price_out_per_1k / 1000   # giriş yuxarı həddi + çıxış tavanı (`max_tokens`)
             try:
                 if scope is not None:  # agentə aid sorğu: Ledger-də AGENTİN adına, sabit op_id ilə (təkrar icra ikinci dəfə ödənilmir)
                     op_id = "llm:" + scope.op_id
@@ -518,9 +531,11 @@ class GuardedLLM:
         actual = resp.input_tokens + resp.output_tokens
         cost = resp.input_tokens * cfg.price_in_per_1k / 1000 + resp.output_tokens * cfg.price_out_per_1k / 1000
         self._finish_tokens(reserve, actual)
+        st = None
         if op_id:  # hesablaşma uğursuzdursa nəticə QAYTARILMIR: rezerv qorunur və sahibin uzlaşdırması üçün işarələnir
             try:
-                settled = bool(self.ledger.commit(op_id, cost))
+                st = self.ledger.settle(op_id, cost) if hasattr(self.ledger, "settle") else None
+                settled = bool(st) if st is not None else bool(self.ledger.commit(op_id, cost))
             except Exception:  # noqa: BLE001
                 settled = False
             if not settled:
@@ -530,6 +545,13 @@ class GuardedLLM:
                     pass
                 raise fail("settlement_failed", LLMBadResponse("xərc hesablaşması uğursuz oldu; rezerv qorunur (uzlaşdırma tələb olunur)"))
         info.update(input_tokens=resp.input_tokens, output_tokens=resp.output_tokens, response_chars=len(resp.text))
+        if st is not None and st.overran:   # faktiki xərc rezervi/tavanı aşdı: dəqiq yazılıb, kəsici açılıb; nəticə "büdcə daxilində uğur" kimi QAYTARILMIR
+            info.update(cost=cost, reserved=st.reserved, overrun=st.overrun, over_cap=st.over_cap, breaker_tripped=st.breaker_tripped)
+            self._log("budget_overrun", t0, info)
+            paid = LLMResult(resp.text, resp.input_tokens, resp.output_tokens, resp.model or cfg.model, name, bool(getattr(self.provider, "is_mock", False)), cost, resp.finish_reason)
+            raise LLMBudgetOverrun(f"faktiki xərc rezervi/tavanı aşdı (xərc={cost:.6f}, rezerv={st.reserved:.6f}, aşma={st.overrun:.6f}, tavan_aşıldı={st.over_cap}): "
+                                   "xərc dəqiq yazıldı, sonrakı ödənişli çağırışlar sahib təmizləyənə qədər bağlıdır",
+                                   result=paid, cost=cost, reserved=st.reserved, overrun=st.overrun, over_cap=st.over_cap)
         if resp.output_tokens > cap:
             raise fail("bad_response", LLMBadResponse("provayder çıxış token limitini aşdı"))
         if len(resp.text) > cfg.max_response_chars:

@@ -283,7 +283,8 @@ def test_cost_is_reserved_then_committed_in_ledger(make, tmp_path):
     client.complete("x" * 300)
     e = ledger.entries()[0]
     assert e.agent == "llm" and e.status == "committed" and e.amount == pytest.approx(0.09 + 0.02)
-    assert e.reserved == pytest.approx(0.1 + 0.1)
+    assert e.reserved == pytest.approx((300 + 64) * 1.0 / 1000 + 0.1)          # mühafizəkar rezerv: simvol başına 1 token + şablon əlavəsi + çıxış tavanı
+    assert e.reserved >= 0.1 + 0.1                                              # köhnə təxminindən AZ deyil
 
 
 def test_cost_limit_blocks_before_provider_call(make, tmp_path):

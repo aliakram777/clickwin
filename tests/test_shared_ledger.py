@@ -170,8 +170,8 @@ def test_cloud_spend_unknown_costs_and_owner_reconciliation_share_the_ledger(tmp
 
 
 def test_system_chat_and_agent_llm_spending_cannot_collectively_exceed_the_global_limit(tmp_path):
-    # hər çağırış faktiki 0.015 AZN (500+500 token); tavan 0.04: yalnız ikisi sığır
-    svc, engines, transport = prod(tmp_path, limit=0.04, responses=[ok_body(pin=500, pout=500)])
+    # hər çağırış faktiki 0.015 AZN (500+500 token), mühafizəkar rezerv ~0.031; tavan 0.05: yalnız ikisi sığır
+    svc, engines, transport = prod(tmp_path, limit=0.05, responses=[ok_body(pin=500, pout=500)])
     led = svc.ledger
     svc.app.chat.send("x" * 900)                                                                       # 1) sistem söhbəti
     assert len(transport.calls) == 1 and led.total() == pytest.approx(0.015)
@@ -183,14 +183,14 @@ def test_system_chat_and_agent_llm_spending_cannot_collectively_exceed_the_globa
     with broker_context(), spend_scope(SpendScope("agent_y", "agt:t2", 1.0, 100.0)), pytest.raises(Exception):
         engines.cloud.client.complete("agent işi " + "w" * 800)
     assert len(transport.calls) == 2                                                                   # heç bir əlavə provayder çağırışı olmayıb
-    assert led.total() <= 0.04 + 1e-9
+    assert led.total() <= 0.05 + 1e-9
 
 
 def test_system_chat_alone_is_bound_by_the_global_cap_not_only_the_generic_llm_limit(tmp_path):
-    svc, engines, transport = prod(tmp_path, limit=0.03, responses=[ok_body(pin=500, pout=500)])      # cost_limit=5.0 (agent tavanı) >> 0.03
+    svc, engines, transport = prod(tmp_path, limit=0.04, responses=[ok_body(pin=500, pout=500)])      # cost_limit=5.0 (agent tavanı) >> 0.04
     for _ in range(4):
         svc.app.chat.send("x" * 900)
-    assert len(transport.calls) == 1 and svc.ledger.total() <= 0.03 + 1e-9
+    assert len(transport.calls) == 1 and svc.ledger.total() <= 0.04 + 1e-9
 
 
 def test_a_zero_global_limit_means_no_paid_spend_at_all(tmp_path):

@@ -67,7 +67,7 @@ class EffectResult:
     reason: str = ""
     output: Any = None
     cost: float | None = None  # committed (faktiki) və ya reserved_unknown (qorunan rezerv)
-    cost_status: str = ""  # committed | reserved_unknown
+    cost_status: str = ""  # committed | reserved_unknown | overrun
     transient: bool = False
     stage: str = ""  # error üçün: run | output
     op_id: str = ""
@@ -248,8 +248,15 @@ class EffectBroker:
         if not op_id or self.ledger is None:
             return result
         if _valid_cost(actual):
-            self.ledger.commit(op_id, actual)
-            return replace(result, cost=float(actual), cost_status="committed")
+            st = self.ledger.settle(op_id, actual) if hasattr(self.ledger, "settle") else None
+            if st is None:
+                self.ledger.commit(op_id, actual)
+                return replace(result, cost=float(actual), cost_status="committed")
+            if st.overran:   # faktiki xərc rezervi/tavanı aşdı: dəqiq yazıldı, davamlı kəsici açıldı (kitabın audit hadisələrində); icra "büdcə daxilində uğur" kimi qaytarılmır
+                reason = (f"budget_overrun: faktiki xərc={float(actual):.6f}, rezerv={st.reserved:.6f}, aşma={st.overrun:.6f}, tavan_aşıldı={st.over_cap}; "
+                          "xərc dəqiq yazıldı, sonrakı rezervlər sahib təmizləyənə qədər bağlıdır")
+                return replace(result, status="error", reason=reason, stage="settlement", cost=float(actual), cost_status="overrun", transient=False)
+            return replace(result, cost=float(actual), cost_status="committed" if st.ok else "")
         self.ledger.mark_unknown(op_id)
         return replace(result, cost=float(reserved), cost_status="reserved_unknown")
 

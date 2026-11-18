@@ -94,6 +94,41 @@ def resolution_scope(op_id: str, actual: float | None) -> tuple[str, str]:
     return str(op_id), hashlib.sha256(body.encode("ascii")).hexdigest()
 
 
+@dataclass(frozen=True)
+class Settlement:
+    """`settle()` nəticəsi. `ok`: rezerv həll olundu (köhnə `commit()` bool müqaviləsi). Faktiki xərc HƏMİŞƏ dəqiq yazılır (kəsilmir/azaldılmır). `overrun`: faktiki - rezerv (>0 isə hesablama
+    rezervi aşıb); `over_cap`: yazıldıqdan sonra ümumi xərc tavanı aşıb; `breaker_tripped`: bu hesablama davamlı "tavan aşıldı" kəsicisini AÇDI."""
+    ok: bool
+    reserved: float = 0.0
+    actual: float = 0.0
+    overrun: float = 0.0
+    over_cap: bool = False
+    breaker_tripped: bool = False
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+    @property
+    def overran(self) -> bool:
+        return self.ok and (self.overrun > 0.0 or self.over_cap)
+
+
+def clear_breaker_scope(breaker_id: int) -> tuple[str, str]:
+    """Sahibin step-up ilə imzalayacağı DƏQİQ əhatə: `clear_cap_breaker` + konkret kəsici id-si (subject). `(subject, hash)` qaytarır; təsdiq yalnız həmin kəsicini təmizləyir."""
+    subject = f"breaker:{int(breaker_id)}"
+    body = json.dumps({"op": "clear_cap_breaker", "subject": subject, "params": {}}, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+    return subject, hashlib.sha256(body.encode("ascii")).hexdigest()
+
+
+def ledger_backend(obj: Any) -> "CostLedger | None":
+    """`CostLedger` və ya onun `LedgerPort`-undan arxa uc kitabı çıxarır (başqa obyekt üçün None). `build_app` mühərrikin kitabını bununla yoxlayır."""
+    if isinstance(obj, CostLedger):
+        return obj
+    if isinstance(obj, LedgerPort):
+        return _PORT_BACKENDS.get(obj._token)
+    return None
+
+
 class CostLedger:
     def __init__(self, db_path: str | Path = DEFAULT_LEDGER_PATH, *, verifier: Any = None, owners: Iterable[str] = (), clock: Callable[[], float] = time.time,
                  global_limit: float | None = None) -> None:
@@ -109,6 +144,9 @@ class CostLedger:
         self._conn = LockedConnection(str(db_path), isolation_level=None, timeout=30)
         self._conn.execute(_SCHEMA)
         self._conn.execute("CREATE TABLE IF NOT EXISTS ledger_used_credentials (nonce TEXT PRIMARY KEY, op_id TEXT NOT NULL, used_at REAL NOT NULL)")
+        self._conn.execute("CREATE TABLE IF NOT EXISTS ledger_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")                       # davamlı "tavan aşıldı" kəsicisi
+        self._conn.execute("CREATE TABLE IF NOT EXISTS ledger_events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, event TEXT NOT NULL, "
+                           "op_id TEXT NOT NULL, data TEXT NOT NULL)")                                                                   # audit: overrun/breaker_tripped/breaker_cleared
         self._migrate()
 
     @property
@@ -137,11 +175,14 @@ class CostLedger:
         _check_text("op_id", op_id)
         _check_text("agent", agent)
         _check_amount("məbləğ", amount)
-        cur = self._conn.execute(
-            "INSERT OR IGNORE INTO costs (op_id, agent, amount, ts, description, status, reserved, unknown)"
-            " VALUES (?, ?, ?, ?, ?, 'committed', ?, 0)",
-            (op_id, agent, float(amount), _now(), description, float(amount)),
-        )
+        with self._tx():
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO costs (op_id, agent, amount, ts, description, status, reserved, unknown)"
+                " VALUES (?, ?, ?, ?, ?, 'committed', ?, 0)",
+                (op_id, agent, float(amount), _now(), description, float(amount)),
+            )
+            if cur.rowcount == 1:
+                self._guard_cap(op_id, 0.0, float(amount))      # faktiki xərc yazıldı: tavanı aşırsa kəsici açılır (xərc dəqiq saxlanır)
         return cur.rowcount == 1
 
     def reserve(
@@ -171,6 +212,9 @@ class CostLedger:
         if self._global_cap is not None:
             global_limit = self._global_cap if global_limit is None else min(float(global_limit), self._global_cap)
         with self._tx():
+            tripped = self._breaker_row()
+            if tripped is not None:      # davamlı kəsici: SIFIR xərcli rezervlər də daxil, HƏR yeni rezerv rədd edilir (yalnız sahib təmizləyir)
+                return Reservation("denied", f"xərc tavanı aşılıb (kəsici #{tripped['id']}, op={tripped['op_id']}): yeni rezerv sahib təmizləyənə qədər bağlıdır")
             row = self._conn.execute("SELECT status FROM costs WHERE op_id = ?", (op_id,)).fetchone()
             if row is not None and row[0] != "released":
                 return Reservation("duplicate", f"təkrar əməliyyat: {op_id}")
@@ -208,12 +252,77 @@ class CostLedger:
         return Reservation("reserved")
 
     def commit(self, op_id: str, actual: float) -> bool:
-        """Faktiki xərci yazır (yalnız NORMAL `reserved`-dən). İkinci dəfə False. NAMƏLUM rezervi təsdiqləməz (False): yalnız `resolve_unknown` (dəqiq sahib təsdiqi) həll edir."""
+        """Köhnə bool müqaviləsi: `settle(...).ok`. Faktiki xərc dəqiq yazılır; rezervi/tavanı aşma `settle` ilə eyni qaydada qeydə alınır və kəsici açılır."""
+        return self.settle(op_id, actual).ok
+
+    def settle(self, op_id: str, actual: float) -> Settlement:
+        """Faktiki (provayderin bildirdiyi) xərci DƏQİQ yazır (YALNIZ normal `reserved`-dən; naməlum rezervi təsdiqləməz). Hesablama və aşma yoxlaması BİR tranzaksiyadadır:
+        faktiki > rezerv və ya ümumi > tavan olarsa aşma məbləği audit cədvəlinə yazılır və davamlı kəsici açılır (sonrakı HƏR rezerv rədd edilir). Xərc heç vaxt kəsilmir/azaldılmır.
+        DÜRÜST QEYD: artıq baş vermiş provayder xərcini heç bir tavan geri qaytara bilməz; kəsici yalnız SONRAKI ödənişli çağırışları dayandırır."""
         _check_amount("faktiki xərc", actual)
-        cur = self._conn.execute(
-            "UPDATE costs SET amount = ?, status = 'committed'"
-            " WHERE op_id = ? AND status = 'reserved' AND unknown = 0", (float(actual), op_id))
-        return cur.rowcount == 1
+        actual = float(actual)
+        with self._tx():
+            row = self._conn.execute("SELECT amount FROM costs WHERE op_id = ? AND status = 'reserved' AND unknown = 0", (op_id,)).fetchone()
+            if row is None:
+                return Settlement(False)
+            reserved = float(row[0])
+            self._conn.execute("UPDATE costs SET amount = ?, status = 'committed' WHERE op_id = ?", (actual, op_id))
+            overrun, over_cap, tripped = self._guard_cap(op_id, reserved, actual)
+        return Settlement(True, reserved, actual, overrun, over_cap, tripped)
+
+    def _guard_cap(self, op_id: str, reserved: float, actual: float) -> tuple[float, bool, bool]:
+        """Tranzaksiya DAXİLİNDƏ çağırılır. `(aşma, tavan_aşıldı, kəsici_açıldı)`."""
+        overrun = actual - reserved
+        overrun = overrun if overrun > _EPS else 0.0
+        total = float(self._conn.execute("SELECT COALESCE(SUM(amount), 0.0) FROM costs").fetchone()[0])
+        cap = self._global_cap
+        over_cap = cap is not None and total > cap + _EPS
+        tripped = False
+        if overrun > 0.0 or over_cap:
+            data = {"reserved": reserved, "actual": actual, "overrun": overrun, "total": total, "cap": cap, "over_cap": over_cap}
+            self._event("overrun", op_id, data)
+            if self._breaker_row() is None:
+                eid = self._event("breaker_tripped", op_id, data)
+                self._conn.execute("INSERT INTO ledger_meta (key, value) VALUES ('breaker', ?)", (json.dumps({"id": eid, "op_id": op_id, **data, "ts": float(self._clock())}),))
+                tripped = True
+        return overrun, over_cap, tripped
+
+    def _event(self, event: str, op_id: str, data: dict) -> int:
+        cur = self._conn.execute("INSERT INTO ledger_events (ts, event, op_id, data) VALUES (?, ?, ?, ?)", (float(self._clock()), event, op_id, json.dumps(data, sort_keys=True)))
+        return int(cur.lastrowid)
+
+    def _breaker_row(self) -> dict | None:
+        row = self._conn.execute("SELECT value FROM ledger_meta WHERE key = 'breaker'").fetchone()
+        return json.loads(row[0]) if row is not None else None
+
+    def breaker(self) -> dict | None:
+        """Açıq "tavan aşıldı" kəsicisi (id, op_id, rezerv, faktiki, aşma, ümumi, tavan, vaxt) və ya None."""
+        return self._breaker_row()
+
+    def events(self, limit: int = 100) -> list[dict]:
+        """Audit hadisələri (overrun, breaker_tripped, breaker_cleared), köhnədən yeniyə."""
+        rows = self._conn.execute("SELECT id, ts, event, op_id, data FROM ledger_events ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+        return [{"id": r[0], "ts": r[1], "event": r[2], "op_id": r[3], "data": json.loads(r[4])} for r in reversed(rows)]
+
+    def clear_breaker(self, approval: Any) -> bool:
+        """Kəsicini YALNIZ həmin kəsicin id-sinə bağlı, bir-dəfəlik sahib step-up təsdiqi ilə təmizləyir (auditə yazılır). Kəsici yoxdursa/id fərqlidirsə False (təsdiq yandırılmır).
+        Təmizləmə tavanı yüksəltmir: ümumi xərc hələ tavandan çoxdursa yeni rezervlər tavan arifmetikası ilə rədd olunmaqda qalır."""
+        current = self._breaker_row()
+        if current is None:
+            return False
+        subject, digest = clear_breaker_scope(current["id"])
+        self._verify_owner(approval, "clear_cap_breaker", subject, digest)
+        with self._tx():
+            row = self._breaker_row()
+            if row is None or row["id"] != current["id"]:
+                return False
+            try:
+                self._conn.execute("INSERT INTO ledger_used_credentials (nonce, op_id, used_at) VALUES (?, ?, ?)", (approval.nonce, subject, float(self._clock())))
+            except sqlite3.IntegrityError:
+                raise ResolutionDenied("sahib təsdiqi artıq istifadə olunub (bir-dəfəlik)", "credential_replayed") from None
+            self._conn.execute("DELETE FROM ledger_meta WHERE key = 'breaker'")
+            self._event("breaker_cleared", row["op_id"], {"breaker_id": row["id"], "by": approval.id})
+        return True
 
     def release(self, op_id: str) -> bool:
         """Normal rezervi azad edir. NAMƏLUM rezervi azad etməz (False): yalnız `resolve_unknown`."""
@@ -247,6 +356,10 @@ class CostLedger:
         return [i for i in ids if self.mark_unknown(i)]
 
     def _verify_resolution(self, op_id: str, actual: float | None, approval: Any) -> None:
+        subject, digest = resolution_scope(op_id, actual)
+        self._verify_owner(approval, "resolve_unknown", subject, digest)
+
+    def _verify_owner(self, approval: Any, scope_op: str, subject: str, digest: str) -> None:
         if self._verifier is None:
             raise ResolutionDenied("etibarlı autentifikasiya qurulmayıb: naməlum rezervin həlli bağlıdır", "owner_auth_unavailable")
         try:
@@ -255,10 +368,9 @@ class CostLedger:
             raise ResolutionDenied(str(exc)[:120], str(getattr(exc, "code", "forged_principal"))) from None
         if getattr(approval, "kind", "") != "human" or getattr(approval, "id", None) not in self._owners:
             raise ResolutionDenied("yalnız real sahib təsdiqi qəbul olunur", "unauthorized")
-        subject, digest = resolution_scope(op_id, actual)
         if (getattr(approval, "scope_op", ""), getattr(approval, "scope_subject", ""), getattr(approval, "scope_hash", ""), getattr(approval, "scope_company", "")) \
-                != ("resolve_unknown", subject, digest, ""):
-            raise ResolutionDenied("sahib təsdiqi bu rezerv id-sinə və nəticəyə/məbləğə bağlı deyil", "scope_mismatch")
+                != (scope_op, subject, digest, ""):
+            raise ResolutionDenied("sahib təsdiqi bu dəqiq əməliyyata/hədəfə/parametrə bağlı deyil", "scope_mismatch")
 
     def resolve_unknown(self, op_id: str, actual: float | None, approval: Any) -> bool:
         """Naməlum rezervin həlli: YALNIZ bu rezerv id-sinə + nəticəyə (`actual` verilibsə təsdiq, `None` isə xərc yoxdur: azad) + məbləğə bağlı, bir-dəfəlik SAHİB step-up təsdiqi ilə
@@ -374,7 +486,8 @@ def reconcile(ledger: CostLedger, audit_path: str | Path) -> ReconcileReport:
 
 
 _PORT_BACKENDS: dict[str, "CostLedger"] = {}                 # modul reyestri: LedgerPort obyektində kitaba istinad YOXDUR
-_PORT_METHODS = ("reserve", "commit", "release", "mark_unknown", "has", "agent_total", "total", "reserved_total", "by_agent", "entries", "unknown_entries", "stale_reserved")
+_PORT_METHODS = ("reserve", "commit", "settle", "release", "mark_unknown", "has", "agent_total", "total", "reserved_total", "by_agent", "entries", "unknown_entries", "stale_reserved",
+                 "breaker", "events")        # `clear_breaker` (sahib təsdiqi), `record`, `expire_stale`, `resolve_unknown` YOXDUR
 
 
 class LedgerPort:
@@ -435,6 +548,22 @@ class LedgerReconciler:
 
     def resolve(self, op_id: str, actual: float | None, approval: Any) -> bool:
         return _RECONCILER_BACKENDS[self._token].resolve_unknown(op_id, actual, approval)
+
+    def breaker(self) -> dict | None:
+        return _RECONCILER_BACKENDS[self._token].breaker()
+
+    def events(self, limit: int = 100) -> list[dict]:
+        return _RECONCILER_BACKENDS[self._token].events(limit)
+
+    def clear_scope(self) -> tuple[str, str]:
+        """Açıq kəsicini təmizləmək üçün sahibin step-up ilə imzalayacağı `(subject, hash)` (kəsici yoxdursa ValueError)."""
+        b = _RECONCILER_BACKENDS[self._token].breaker()
+        if b is None:
+            raise ValueError("açıq kəsici yoxdur")
+        return clear_breaker_scope(b["id"])
+
+    def clear_breaker(self, approval: Any) -> bool:
+        return _RECONCILER_BACKENDS[self._token].clear_breaker(approval)
 
 
 def log_denial(audit_path: str | Path, agent: str, permission: str, cost: float,
