@@ -1,7 +1,7 @@
 # CLAUDE.md — NAYMERA
 
 Agent sistemi: CEO agent + şöbə agentləri. Stack: Python 3.12, pytest, SQLite.
-Mərhələ 1-17 hazırdır (PR #22: dəqiq əhatəli sahib etibarnaməsi, ləğv, iplik-təhlükəsiz SQLite, Ledger rezervləri, Broker-li LLM) (17: real AI runtime + agent fabrikası + çoxagentli axın + məhsul bünövrəsi, real provayder/alət YOXDUR; 16: daimi hibrid AI — Cloud+Local, AUTO/CLOUD/LOCAL, real provayder/model/səs YOXDUR; 13-15: Android API, Keystore/biometrik imza ilə step-up, Kotlin/Compose layihəsi, JVM kontrakt sınağı; APK build EDİLMƏYİB — SDK/`dl.google.com` yoxdur; 7: Effect Broker; 8: təsdiq; 9: Tool Runtime; 10: LLM adapter — interfeys və mock; 11: yaddaş və virtual şirkət; 12: internet araşdırması, proaktiv zəka, Android-first interfeyslər). Əsas platforma: Android APK (Telegram əsas deyil): agent yaratma, təhlükəsizlik qapısı, reyestr, orkestrator, CEO agent, xərc kitabı, büdcə siyasəti, asılılıq qrafı və retry (bax: STATUS.md).
+Mərhələ 1-17 hazırdır (18.0: `kernel/` yalnız müqavilələr, icra/icazə YOXDUR — KERNEL_CONTRACTS.md) (PR #22: dəqiq əhatəli sahib etibarnaməsi, ləğv, iplik-təhlükəsiz SQLite, Ledger rezervləri, Broker-li LLM) (17: real AI runtime + agent fabrikası + çoxagentli axın + məhsul bünövrəsi, real provayder/alət YOXDUR; 16: daimi hibrid AI — Cloud+Local, AUTO/CLOUD/LOCAL, real provayder/model/səs YOXDUR; 13-15: Android API, Keystore/biometrik imza ilə step-up, Kotlin/Compose layihəsi, JVM kontrakt sınağı; APK build EDİLMƏYİB — SDK/`dl.google.com` yoxdur; 7: Effect Broker; 8: təsdiq; 9: Tool Runtime; 10: LLM adapter — interfeys və mock; 11: yaddaş və virtual şirkət; 12: internet araşdırması, proaktiv zəka, Android-first interfeyslər). Əsas platforma: Android APK (Telegram əsas deyil): agent yaratma, təhlükəsizlik qapısı, reyestr, orkestrator, CEO agent, xərc kitabı, büdcə siyasəti, asılılıq qrafı və retry (bax: STATUS.md).
 
 ## Mütləq qaydalar
 
@@ -90,6 +90,8 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 ├── tools/run_privileged_isolation_tests.sh # root izolyasiya testləri, atlama yox (CI: isolation-privileged)
 ├── tools/gen_signing_key.py   # imza açarı yaradır (0600, O_EXCL; şəxsi açar çıxışa yazılmır)
 ├── tools/serve.py             # serveri mühit dəyişənlərindən qurulmuş mühərriklərlə işə salır
+├── KERNEL_CONTRACTS.md        # Mərhələ 18.0: kernel müqavilələri (Goal/Plan/Event/Capability/ImprovementProposal), qaydalar, məhdudiyyətlər
+├── kernel/                    # Mərhələ 18.0: dəyişməz versiyalı müqavilələr (common/goal/plan/events/capability/proposal) + eventlog.py (SQLite, append-only, idempotent); İCRA/İCAZƏ YOXDUR
 ├── AGENT_FACTORY.md           # agent fabrikası, komanda axını, builder bünövrəsi, real AI runtime, məhdudiyyətlər
 ├── .env.example               # boş server mühit dəyişənləri (açar yoxdur)
 ├── runtime/brokered_llm.py    # BrokeredRouter: sistem söhbət/plan LLM çağırışları EffectBroker.run daxilində
@@ -103,7 +105,7 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 ├── safety/tools.py            # Tool Runtime: allowlist, limitlər, SandboxAdapter interfeysi (real OS sandbox YOXDUR)
 ├── safety/workspace.py        # workspace fayl sərhədi (tətbiq səviyyəli) + fs.read/fs.write/fs.list
 ├── safety/ledger.py           # SQLite xərc kitabı: rezerv/təsdiq/azad, limitlər (data/ledger.db)
-└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration/workflow/retry/broker/approvals/approval_broker/workspace/tool_runtime/llm/llm_planner/memory/company/durable/research/proactive/mobile/api_http/api_auth/api_app/api_bootstrap/api_p256/android_integration/android_project/jvm_contract[opt-in]/hybrid_router/hybrid_api/local_models/voice_registry/providers/agent_factory/agent_runtime/factory_hardening/security_boundary/agent_isolation/agent_isolation_hardening/remaining_hardening/locked_connection/ledger_resolution/paid_llm_entry_points/shared_ledger/build_app_engine_ledger/overrun_breaker/unicode_engine_ceiling/local_runtime_bypass/dns_pinning/api_object_graph/isolation_limits/ci_privileged_policy/team/builders/company_suspend/orchestrator_target)
+└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration/workflow/retry/broker/approvals/approval_broker/workspace/tool_runtime/llm/llm_planner/memory/company/durable/research/proactive/mobile/api_http/api_auth/api_app/api_bootstrap/api_p256/android_integration/android_project/jvm_contract[opt-in]/hybrid_router/hybrid_api/local_models/voice_registry/providers/agent_factory/agent_runtime/factory_hardening/security_boundary/agent_isolation/agent_isolation_hardening/remaining_hardening/locked_connection/ledger_resolution/paid_llm_entry_points/shared_ledger/build_app_engine_ledger/overrun_breaker/unicode_engine_ceiling/local_runtime_bypass/dns_pinning/api_object_graph/isolation_limits/ci_privileged_policy/team/builders/company_suspend/orchestrator_target/kernel_contracts)
 ```
 
 Yeni kod əlavə olunanda bu xəritəni yenilə.
