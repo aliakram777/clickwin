@@ -27,7 +27,7 @@ from api.jobs import JobService
 from safety.approvals import ApprovalService
 from runtime.brokered_llm import BrokeredRouter
 from runtime.factory_bootstrap import FactoryStack, TrustAnchor
-from safety.ledger import CostLedger
+from safety.ledger import CostLedger, LedgerReconciler
 
 
 def _no_runner(spec: Any, data: dict) -> dict:
@@ -45,6 +45,7 @@ class Services:
     router: HybridRouter
     data_dir: Path
     factory: FactoryStack | None = None   # yalnız etibarlı server kodu; agentlərə verilmir
+    reconciler: LedgerReconciler | None = None   # naməlum rezervlərin sahib təsdiqi ilə həlli (yalnız etibarlı server kodu)
 
 
 def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: float = 0.0,
@@ -57,7 +58,7 @@ def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: fl
     reg = Registry(d / "naymera.db")
     company = Company(reg, d / "company.db", audit, owners={owner_id}, verifier=trust.verifier if trust is not None else None)
     events = EventStore(d / "events.db")
-    ledger = CostLedger(d / "ledger.db")
+    ledger = CostLedger(d / "ledger.db", verifier=trust.verifier if trust is not None else None, owners={owner_id})
     approvals = ApprovalService(d / "approvals.db", audit, owners={owner_id}, channels=[ApprovalEventChannel(events)])
     policy = company.view.budget_policy(global_limit=global_limit)
     orch = Orchestrator(reg, _no_runner, audit_path=audit, stop_path=stop, errors_path=d / "errors.jsonl",
@@ -91,4 +92,4 @@ def build_app(data_dir: str | Path, *, owner_id: str = "owner", global_limit: fl
             global_limit=lambda: policy.global_limit,
             orchestrator_factory=lambda runner: Orchestrator(reg, runner, audit_path=audit, stop_path=stop, errors_path=d / "errors.jsonl",
                                                              ledger=ledger, approvals=approvals.client, policy=policy))
-    return Services(app, auth, approvals, company, memory, events, router, d, stack)
+    return Services(app, auth, approvals, company, memory, events, router, d, stack, LedgerReconciler(ledger))

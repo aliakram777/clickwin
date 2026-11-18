@@ -7,14 +7,16 @@ Rezervasiya BEGIN IMMEDIATE tranzaksiyasındadır: paralel bağlantılar limiti 
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sqlite3
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from safety.dbconn import LockedConnection
 
@@ -71,12 +73,34 @@ class BudgetPolicy:
             _check_limit(name, value)
 
 
+class ResolutionDenied(Exception):
+    """`resolve_unknown` üçün sahib təsdiqi qəbul olunmadı (`code`: owner_auth_unavailable, forged_principal, role_not_allowed, scope_mismatch, credential_replayed, ...)."""
+
+    def __init__(self, message: str, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def resolution_scope(op_id: str, actual: float | None) -> tuple[str, str]:
+    """Sahibin step-up ilə imzalayacağı DƏQİQ əhatə: `resolve_unknown` + rezerv id-si (subject) + nəticə (`release`/`commit`) və məbləğin SHA-256-sı. `(subject, hash)` qaytarır."""
+    if actual is None:
+        params: dict = {"outcome": "release", "amount": 0.0}
+    else:
+        _check_amount("faktiki xərc", actual)
+        params = {"outcome": "commit", "amount": float(actual)}
+    body = json.dumps({"op": "resolve_unknown", "subject": str(op_id), "params": params}, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+    return str(op_id), hashlib.sha256(body.encode("ascii")).hexdigest()
+
+
 class CostLedger:
-    def __init__(self, db_path: str | Path = DEFAULT_LEDGER_PATH) -> None:
+    def __init__(self, db_path: str | Path = DEFAULT_LEDGER_PATH, *, verifier: Any = None, owners: Iterable[str] = (), clock: Callable[[], float] = time.time) -> None:
+        """`verifier` (yalnız yoxlama: `check_principal`) və `owners` yalnız naməlum rezervlərin sahib təsdiqi ilə həllində (`resolve_unknown`) istifadə olunur; verilməyibsə həll BAĞLIDIR."""
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._verifier, self._owners, self._clock = verifier, frozenset(owners), clock
         self._conn = LockedConnection(str(db_path), isolation_level=None, timeout=30)
         self._conn.execute(_SCHEMA)
+        self._conn.execute("CREATE TABLE IF NOT EXISTS ledger_used_credentials (nonce TEXT PRIMARY KEY, op_id TEXT NOT NULL, used_at REAL NOT NULL)")
         self._migrate()
 
     def close(self) -> None:
@@ -207,21 +231,38 @@ class CostLedger:
         ids = [e.op_id for e in self.stale_reserved(older_than_s, now)]
         return [i for i in ids if self.mark_unknown(i)]
 
-    def resolve_unknown(self, op_id: str, actual: float | None, resolved_by: str) -> bool:
-        """SAHİB uzlaşdırması (yalnız `unknown` rezerv üçün): `actual` verilibsə faktiki xərclə təsdiqlənir, `None` isə xərc olmadığı təsdiqlənərək azad edilir.
-        Naməlum olmayan və ya olmayan op_id üçün False."""
-        _check_text("resolved_by", resolved_by)
+    def _verify_resolution(self, op_id: str, actual: float | None, approval: Any) -> None:
+        if self._verifier is None:
+            raise ResolutionDenied("etibarlı autentifikasiya qurulmayıb: naməlum rezervin həlli bağlıdır", "owner_auth_unavailable")
+        try:
+            self._verifier.check_principal(approval, "owner")           # imza, rol, ömür, ləğv (cihaz daxil)
+        except Exception as exc:  # noqa: BLE001
+            raise ResolutionDenied(str(exc)[:120], str(getattr(exc, "code", "forged_principal"))) from None
+        if getattr(approval, "kind", "") != "human" or getattr(approval, "id", None) not in self._owners:
+            raise ResolutionDenied("yalnız real sahib təsdiqi qəbul olunur", "unauthorized")
+        subject, digest = resolution_scope(op_id, actual)
+        if (getattr(approval, "scope_op", ""), getattr(approval, "scope_subject", ""), getattr(approval, "scope_hash", ""), getattr(approval, "scope_company", "")) \
+                != ("resolve_unknown", subject, digest, ""):
+            raise ResolutionDenied("sahib təsdiqi bu rezerv id-sinə və nəticəyə/məbləğə bağlı deyil", "scope_mismatch")
+
+    def resolve_unknown(self, op_id: str, actual: float | None, approval: Any) -> bool:
+        """Naməlum rezervin həlli: YALNIZ bu rezerv id-sinə + nəticəyə (`actual` verilibsə təsdiq, `None` isə xərc yoxdur: azad) + məbləğə bağlı, bir-dəfəlik SAHİB step-up təsdiqi ilə
+        (`resolution_scope`; cihazın Keystore imzası). Təsdiq uyğunsuz/təkrar/ləğv olunmuş/etibarsızdırsa `ResolutionDenied`; naməlum olmayan/olmayan op_id üçün `False` (təsdiq yandırılmır)."""
+        _check_text("op_id", op_id)
+        self._verify_resolution(op_id, actual, approval)
         with self._tx():
             row = self._conn.execute("SELECT 1 FROM costs WHERE op_id = ? AND status = 'reserved' AND unknown = 1", (op_id,)).fetchone()
             if row is None:
                 return False
+            try:
+                self._conn.execute("INSERT INTO ledger_used_credentials (nonce, op_id, used_at) VALUES (?, ?, ?)", (approval.nonce, op_id, float(self._clock())))
+            except sqlite3.IntegrityError:
+                raise ResolutionDenied("sahib təsdiqi artıq istifadə olunub (bir-dəfəlik)", "credential_replayed") from None
+            tag = f" [uzlaşdırıldı:{approval.id}:{'azad' if actual is None else 'təsdiq'}]"
             if actual is None:
-                self._conn.execute("UPDATE costs SET amount = 0, status = 'released', unknown = 0, description = description || ? WHERE op_id = ?",
-                                   (f" [uzlaşdırıldı:{resolved_by}:azad]", op_id))
+                self._conn.execute("UPDATE costs SET amount = 0, status = 'released', unknown = 0, description = description || ? WHERE op_id = ?", (tag, op_id))
             else:
-                _check_amount("faktiki xərc", actual)
-                self._conn.execute("UPDATE costs SET amount = ?, status = 'committed', unknown = 0, description = description || ? WHERE op_id = ?",
-                                   (float(actual), f" [uzlaşdırıldı:{resolved_by}]", op_id))
+                self._conn.execute("UPDATE costs SET amount = ?, status = 'committed', unknown = 0, description = description || ? WHERE op_id = ?", (float(actual), tag, op_id))
         return True
 
     # --- oxuma ---
@@ -315,6 +356,28 @@ def reconcile(ledger: CostLedger, audit_path: str | Path) -> ReconcileReport:
         elif abs(a_sum - l_sum) > _EPS:
             rep.mismatches.append(f"{agent}: audit məbləği {a_sum:.6f}, kitab {l_sum:.6f}")
     return rep
+
+
+class LedgerReconciler:
+    """Sahib uzlaşdırması üçün DAR səth (etibarlı server kodu): naməlum rezervləri göstərir, step-up əhatəsini hesablayır və YALNIZ sahib təsdiqi ilə həll edir.
+    `reserve/commit/release` kimi yazma imkanları YOXDUR."""
+    __slots__ = ("_ledger",)
+
+    def __init__(self, ledger: CostLedger) -> None:
+        object.__setattr__(self, "_ledger", ledger)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("dəyişdirilə bilməz")
+
+    def unknown(self) -> list[LedgerEntry]:
+        return self._ledger.unknown_entries()
+
+    @staticmethod
+    def scope(op_id: str, actual: float | None) -> tuple[str, str]:
+        return resolution_scope(op_id, actual)
+
+    def resolve(self, op_id: str, actual: float | None, approval: Any) -> bool:
+        return self._ledger.resolve_unknown(op_id, actual, approval)
 
 
 def log_denial(audit_path: str | Path, agent: str, permission: str, cost: float,

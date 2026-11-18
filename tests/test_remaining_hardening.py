@@ -482,7 +482,6 @@ def test_B6_key_generator_tool_writes_a_private_file_and_never_prints_the_key(tm
 def test_A7_unknown_reservations_are_never_created_or_settled(tmp_path):
     led = CostLedger(tmp_path / "l.db")
     assert led.commit("nope", 1.0) is False and led.release("nope") is False and led.mark_unknown("nope") is False
-    assert led.resolve_unknown("nope", 1.0, "owner") is False
     assert led.entries() == [] and led.total() == 0.0                                    # naməlum op_id üçün sətir YARANMIR
 
 
@@ -505,19 +504,17 @@ def test_A7_a_reservation_settles_exactly_once_even_under_racing_commit_and_rele
     assert led.reserved_total() >= 0 and abs(led.total() - 0.1 * sum(1 for e in led.entries() if e.status == "committed")) < 1e-9
 
 
-def test_A7_stale_reservations_are_marked_unknown_not_silently_freed_and_need_owner_reconciliation(tmp_path):
+def test_A7_stale_reservations_are_marked_unknown_not_silently_freed(tmp_path):
     led = CostLedger(tmp_path / "l.db")
     assert led.reserve("old", "a", 0.5).ok and led.reserve("fresh", "a", 0.25).ok
     future = datetime.now(timezone.utc) + timedelta(hours=2)
     assert led.stale_reserved(3600, now=future) and led.stale_reserved(3600) == []
-    assert led.expire_stale(3600, now=future) == ["old", "fresh"] or set(led.expire_stale(3600, now=future)) <= {"old", "fresh"}
-    led.expire_stale(3600, now=future)
+    assert set(led.expire_stale(3600, now=future)) == {"old", "fresh"}
     assert abs(led.total() - 0.75) < 1e-9                                                # pul sayılmaqda qalır (sızma azad etmə YOXDUR)
     assert {e.op_id for e in led.unknown_entries()} == {"old", "fresh"}
-    assert led.resolve_unknown("fresh", None, "owner") is True                            # sahib: xərc olmadığını təsdiqləyir
-    assert led.resolve_unknown("old", 0.4, "owner") is True                               # sahib: faktiki xərc
-    assert led.resolve_unknown("old", 0.4, "owner") is False                              # təkrar uzlaşdırma yoxdur
-    assert abs(led.total() - 0.4) < 1e-9 and led.unknown_entries() == []
+    with pytest.raises(Exception):                                                       # etibarlı autentifikasiya qurulmayıb: həll bağlıdır (sahib təsdiqi ayrıca test olunur)
+        led.resolve_unknown("old", None, "owner")
+    assert abs(led.total() - 0.75) < 1e-9
 
 
 class _PaidFake:
@@ -561,9 +558,7 @@ def test_A7_provider_failure_keeps_the_amount_as_unknown_until_the_owner_reconci
         llm.complete("salam")
     assert prov.calls == 1
     unknown = led.unknown_entries()
-    assert len(unknown) == 1 and led.total() > 0.0                                      # provayder xərc çəkmiş ola bilər: məbləğ qorunur, sızma deyil
-    assert led.resolve_unknown(unknown[0].op_id, None, "owner") is True                  # yalnız sahib uzlaşdırması azad edir
-    assert led.total() == 0.0 and led.unknown_entries() == []
+    assert len(unknown) == 1 and led.total() > 0.0                                      # provayder xərc çəkmiş ola bilər: məbləğ qorunur, sızma deyil (həll yalnız sahib təsdiqi ilə)
 
 
 # ============================================================================ A-8: hər ödənişli LLM çağırışı Broker/Gate/Ledger-dən keçir
