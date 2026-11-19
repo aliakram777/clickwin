@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import az.naymera.app.security.DeviceKey
 
 /**
  * Cihazdakı sessiya: yalnız server tərəfindən verilən tokenlər. APK-da heç bir server, LLM və ya üçüncü tərəf açarı saxlanmır;

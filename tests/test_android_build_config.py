@@ -134,3 +134,107 @@ def test_compose_sources_type_check_against_compose_multiplatform():
     cmd = ["gradle", "--no-daemon", "-q", "-p", str(ANDROID / "compose-check"), "compileKotlin"]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Stage 18.15+: CI-nin real `compileDebugKotlin` addımı `SessionStore.kt`-də `DeviceKey` import-unun olmadığını üzə çıxardı
+# (Unresolved reference: DeviceKey). Android-dan asılı fayllar JVM/Compose yoxlamalarında stub ilə əvəz olunduğu üçün gizli qalmışdı.
+# ----------------------------------------------------------------------------------------------------------------------
+_KT_DECL = re.compile(
+    r"^(?:(?:data|sealed|enum|abstract|open|annotation|inline|value|fun)\s+)*"
+    r"(?P<kind>class|object|interface|typealias)\s+(?P<name>\w+)", re.M)
+_KT_FUN = re.compile(r"^(?:(?:inline|suspend|operator|infix)\s+)*fun\s+(?:<[^>]+>\s*)?(?P<recv>[\w.<>?]+\.)?(?P<name>\w+)\s*\(", re.M)
+_KT_VAL = re.compile(r"^(?:const\s+)?(?:val|var)\s+(?:(?P<recv>[\w.<>?]+)\.)?(?P<name>\w+)\b", re.M)
+
+
+def _strip_kotlin(text: str) -> str:
+    """Şərhlər və sətir literalları çıxarılır: yalnız real kod yoxlanılır (şərhdə `DeviceKey` yazmaq istifadə sayılmır)."""
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", "", text)
+    text = re.sub(r'"(?:\\.|[^"\\\n])*"', '""', text)
+    return re.sub(r"^(?:import|package)\s[^\n]*$", "", text, flags=re.M)          # import/package sətirləri kod deyil (`ui.res` ≠ `res` funksiyası)
+
+
+def find_missing_cross_package_imports(files: dict[str, str]) -> list[tuple[str, str, str]]:
+    """Hər Kotlin faylı üçün: başqa paketdəki layihə simvolu (sinif/obyekt/interfeys/typealias, yuxarı səviyyəli fun/val) kodda istifadə olunur,
+    lakin nə eyni paketdədir, nə dəqiq (explicit) və ya `.*` ilə import olunub, nə də tam-ixtisaslı (`az.naymera.app.ui.UiText`) yazılıb → (fayl, ad, paket).
+    Genişləndirici funksiyalar (`fun Throwable.toUiText()`) nöqtə ilə çağırılsa da import tələb edir; digər simvollar üçün qarşısındakı nöqtə (üzv/ixtisaslı) istifadədir."""
+    pkg_of: dict[str, str] = {}
+    declared: dict[str, dict[str, bool]] = {}          # ad -> {paket: genişləndiricidirmi}
+    for path, text in files.items():
+        pkg = re.search(r"^package ([\w.]+)", text, re.M).group(1)
+        pkg_of[path] = pkg
+        code = _strip_kotlin(text)
+        for m in _KT_DECL.finditer(code):
+            if not re.match(r"\s*private\b", m.group(0)):
+                declared.setdefault(m.group("name"), {})[pkg] = False
+        for m in _KT_FUN.finditer(code):
+            declared.setdefault(m.group("name"), {})[pkg] = declared.get(m.group("name"), {}).get(pkg, False) or bool(m.group("recv"))
+        for m in _KT_VAL.finditer(code):
+            declared.setdefault(m.group("name"), {})[pkg] = declared.get(m.group("name"), {}).get(pkg, False) or bool(m.group("recv"))
+    problems: list[tuple[str, str, str]] = []
+    for path, text in files.items():
+        pkg, code = pkg_of[path], _strip_kotlin(text)
+        imports = set(re.findall(r"^import ([\w.*]+)", text, re.M))
+        for name, owners in declared.items():
+            if pkg in owners:                                           # eyni paket: import lazım deyil
+                continue
+            if re.search(rf"^[ \t]+(?:[a-z]+\s+)*(?:val|var|fun|class|object|interface)\s+(?:<[^>]+>\s*)?(?:[\w.<>?]+\.)?{re.escape(name)}\b", code, re.M):
+                continue                                                # fayl adı özü bəyan edir (üzv/lokal): xarici simvolu kölgələyir, import lazım deyil
+            is_ext = any(owners.values())
+            pattern = rf"(?<![\w]){re.escape(name)}\b" if is_ext else rf"(?<![\w.]){re.escape(name)}\b"
+            for m in re.finditer(pattern, code):
+                before = code[max(0, m.start() - 80):m.start()]
+                if any(before.endswith(f"{o}.") for o in owners):       # tam-ixtisaslı istifadə
+                    continue
+                if any(f"{o}.{name}" in imports or f"{o}.*" in imports for o in owners):
+                    break
+                if is_ext and not before.endswith("."):                 # genişləndirici funksiyanın öz bəyanı/ad toqquşması deyil, çağırışı deyil
+                    continue
+                problems.append((path, name, sorted(owners)[0]))
+                break
+    return problems
+
+
+def _real_kotlin_sources() -> dict[str, str]:
+    return {str(p.relative_to(MAIN / "java")): read(p) for p in (MAIN / "java").rglob("*.kt")}
+
+
+def test_session_store_imports_and_uses_the_real_device_key():
+    """Reqressiya: `SessionStore` real `az.naymera.app.security.DeviceKey`-i import edir və çağırır (stub/saxta əvəz yoxdur)."""
+    store = read(MAIN / "java/az/naymera/app/data/SessionStore.kt")
+    assert re.search(r"^import az\.naymera\.app\.security\.DeviceKey$", store, re.M)
+    assert "DeviceKey.exists()" in store and "DeviceKey.delete()" in store
+    key = read(MAIN / "java/az/naymera/app/security/DeviceKey.kt")
+    assert re.search(r"^package az\.naymera\.app\.security$", key, re.M) and re.search(r"^object DeviceKey\b", key, re.M)
+    assert '"AndroidKeyStore"' in key and "PURPOSE_SIGN" in key                                          # saxta deyil: həqiqi Keystore açarı
+    assert 'object DeviceKey' not in read(ANDROID / "compose-check" / "stubs" / "StubSessionStore.kt")  # stub DeviceKey-i təkrar bəyan etmir
+    assert not (MAIN / "java/az/naymera/app/data/DeviceKey.kt").exists()                                  # ikinci (saxta) DeviceKey yoxdur
+    assert sum(1 for t in _real_kotlin_sources().values() if re.search(r"^object DeviceKey\b", t, re.M)) == 1
+
+
+def test_no_missing_cross_package_imports_in_the_real_sources():
+    assert find_missing_cross_package_imports(_real_kotlin_sources()) == []
+
+
+def test_missing_import_detector_flags_real_gaps_and_accepts_valid_forms():
+    a = "package p.sec\n\nobject DeviceKey { fun exists() = true }\nfun Throwable.toKind(): Int = 1\nfun helper(): Int = 2\n"
+    def run(use: str, extra: str = "") -> list:
+        b = f"package p.data\n{extra}\nclass Store {{ {use} }}\n"
+        return find_missing_cross_package_imports({"a.kt": a, "b.kt": b})
+    assert run("val x = DeviceKey.exists()") == [("b.kt", "DeviceKey", "p.sec")]                         # SessionStore hadisəsi
+    assert run("val x = DeviceKey.exists()", "import p.sec.DeviceKey") == []                              # dəqiq import
+    assert run("val x = DeviceKey.exists()", "import p.sec.*") == []                                      # ulduzlu import
+    assert run("val x = p.sec.DeviceKey.exists()") == []                                                  # tam-ixtisaslı (NaymeraApp/UiText hadisələri)
+    assert run("fun f(k: p.sec.DeviceKey) {}") == []
+    assert run("// DeviceKey.exists() şərhdə\n val s = \"DeviceKey\"") == []                              # şərh/sətir istifadə deyil
+    assert run("val x = helper()") == [("b.kt", "helper", "p.sec")]                                       # yuxarı səviyyəli funksiya
+    assert run("val x = helper()", "import p.sec.helper") == []
+    assert run("fun f(e: Exception) = e.toKind()") == [("b.kt", "toKind", "p.sec")]                       # genişləndirici funksiya nöqtə ilə də import tələb edir
+    assert run("fun f(e: Exception) = e.toKind()", "import p.sec.toKind") == []
+    assert run("val x = foo.DeviceKey") == []                                                              # başqa obyektin üzvü (nöqtədən sonra): xəta deyil
+    same = find_missing_cross_package_imports({"a.kt": a, "c.kt": "package p.sec\nval y = DeviceKey.exists()\n"})
+    assert same == []                                                                                      # eyni paket
+    shadow = "package p.data\nobject Own {\n    val helper = 1\n    fun use() = helper\n}\n"
+    assert find_missing_cross_package_imports({"a.kt": a, "b.kt": shadow}) == []                         # fayl öz üzvünü bəyan edir (CoreChallenge.STEP_RESOLUTIONS)
+    assert find_missing_cross_package_imports({"a.kt": a.replace("object DeviceKey", "private object DeviceKey"), "b.kt": "package p.data\nval x = DeviceKey\n"}) == []   # private simvol
