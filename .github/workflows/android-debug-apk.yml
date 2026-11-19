@@ -1,0 +1,126 @@
+name: Android debug APK
+
+# Yalnız DEBUG APK: debug açarı ilə (AGP-nin runner-də yaratdığı müvəqqəti açar) imzalanır. Heç bir imza açarı, secret, release, nəşr və ya deploy YOXDUR.
+# APK yalnız yüklənə bilən workflow ARTEFAKTI kimi saxlanır (repo/Release/mağaza/paket reyestri deyil). Avtomatik işə düşmə yalnız android/ dəyişikliyi olan PR-da;
+# əl ilə işə salma: Actions → "Android debug APK" → Run workflow.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "android/**"
+      - ".github/workflows/android-debug-apk.yml"
+      - "tools/jvm_contract.py"
+      - "tools/compose_check.py"
+      - "tools/serve_core_dev.py"
+
+# Minimum icazə: yalnız kodu oxumaq. Artefakt yükləmə iş vaxtı tokeni ilə işləyir və əlavə icazə tələb etmir.
+permissions:
+  contents: read
+
+concurrency:
+  group: android-debug-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Dəqiq versiyalar (android/BUILD_STATUS.md və android/build.gradle.kts ilə uyğun): AGP 8.5.2 → Gradle ≥ 8.7, JDK 17+.
+  GRADLE_VERSION: "8.9"
+  JAVA_VERSION: "17"
+  ANDROID_PLATFORM: "android-34"
+  ANDROID_BUILD_TOOLS: "34.0.0"
+
+jobs:
+  build-debug-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # Üçüncü tərəf action-lar tam commit SHA-sına pinlənib (versiya şərhdədir).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      # DİQQƏT: bu addım Android SDK lisenziyalarını runner-də avtomatik qəbul edir (CI mühitində standart qaydadır; lisenziya qəbulu sahibin qərarıdır).
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          packages: "platform-tools platforms;${{ env.ANDROID_PLATFORM }} build-tools;${{ env.ANDROID_BUILD_TOOLS }}"
+
+      - uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: Toolchain versions
+        run: |
+          java -version
+          gradle --version
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms" "$ANDROID_HOME/build-tools"
+
+      - name: Python dependencies
+        run: python -m pip install --upgrade pip pytest -r requirements.txt
+
+      - name: Focused tests (Python)
+        run: >
+          python -m pytest -q -rs
+          tests/test_android_project.py tests/test_android_integration.py tests/test_android_build_config.py tests/test_android_workflow.py
+          tests/test_core_api.py tests/test_core_signing_flow.py tests/test_serve_core_dev.py
+
+      - name: JVM contract tests (real Python backend on loopback)
+        run: python tools/jvm_contract.py
+
+      - name: Compose type-check
+        run: python tools/compose_check.py
+
+      - name: Build debug APK
+        run: >
+          gradle -p android :app:assembleDebug --stacktrace --no-daemon
+          -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8"
+
+      - name: Verify the APK (real file, valid package, debug-signed)
+        run: |
+          set -euo pipefail
+          APK_DIR=android/app/build/outputs/apk/debug
+          APK="$(ls "$APK_DIR"/*.apk | head -n 1)"
+          test -s "$APK"
+          unzip -l "$APK" | grep -q "classes.dex"
+          unzip -l "$APK" | grep -q "AndroidManifest.xml"
+          AAPT2="$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}/aapt2"
+          "$AAPT2" dump badging "$APK" | tee /tmp/badging.txt | head -n 5
+          grep -q "package: name='az.naymera.app'" /tmp/badging.txt
+          grep -q "^sdkVersion:'26'" /tmp/badging.txt
+          SIGNER="$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}/apksigner"
+          "$SIGNER" verify --verbose "$APK" | head -n 5
+          {
+            echo "### Debug APK"
+            echo "- file: \`$(basename "$APK")\`"
+            echo "- size: $(stat -c %s "$APK") bytes"
+            echo "- sha256: \`$(sha256sum "$APK" | cut -d' ' -f1)\`"
+            echo "- signed with the throw-away DEBUG key only (not a release build)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload debug APK (workflow artifact only)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: naymera-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload test and build reports (on failure)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: android-build-reports
+          path: |
+            android/app/build/reports
+            android/jvm-contract/build/reports
+            android/compose-check/build/reports
+          if-no-files-found: ignore
+          retention-days: 7

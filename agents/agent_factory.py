@@ -1,0 +1,1131 @@
+"""Agent fabriki: ixtisaslaşmış agentlərin yaradılması, idarəsi (dayandır/yenidən başlat/arxivlə/sil), tapşırıq və ötürmə qeydi, nəticə hesabatı.
+
+Təhlükəsizlik modeli (mövcud `Company` qatının üzərində, onu keçmir):
+- Agent səlahiyyəti/büdcəsi yalnız `Company` vasitəsilə dəyişir və GENİŞLƏNMƏ yalnız sahibdədir. NAYMERA (sistem) yalnız MƏHDUD agent yarada bilər
+  (`read_files`, büdcə 0 AZN, ötürmə yox); agent öz icazəsini artıra bilməz, yalnız sorğu yaza bilər (`request_permission`), sorğunu yalnız sahib həll edir.
+- Fabrik heç nə İCRA ETMİR: tapşırıq yalnız qeyd olunur. İcra `agent_runtime` -> Orkestrator -> Effect Broker/Gate/Təsdiq/Ledger yolundadır.
+- Agentlərarası məlumat (ötürmə payload-ı, nəticə) ETİBARSIZDIR: təmizlənir, sirr rədd edilir, təlimat bənzərliyi işarələnir və
+  `<untrusted_agent_output>` blokuna bükülür; heç vaxt təlimat kimi icra olunmur.
+- Hər əməliyyat (qəbul və rədd) audit jurnalına yazılır; sirr jurnala düşmür.
+- Büdcə: defolt 0 AZN; qlobal tavan (`global_budget_cap`) yalnız sahib tərəfindən qaldırılır.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import re
+import secrets
+import sqlite3
+import threading
+import time
+import unicodedata
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Iterable, Sequence
+
+from agents.agent_roles import ROLE_CATALOG, MemoryPolicy, RoleTemplate
+from agents.company import DEPARTMENTS, Authority, Company, CompanyDenied, CompanyView, company_scope
+from agents.factory_auth import CredentialError, DispatchAuthorization, Keyring
+from agents.memory import detect_secrets
+from agents.orchestrator import Task
+from agents.research import detect_injection
+from agents.spec import KNOWN_PERMISSIONS, AgentSpec
+from safety.dbconn import connect
+from safety.approvals import Principal
+
+SPEC_COST_CEILING = 5.0   # spec tavanı: real büdcə Company-də (defolt 0.0) və qlobal tavanla məhdudlaşır
+_OP_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,80}$")
+_ART_RE = re.compile(r"^[A-Za-z0-9_.\-/]{1,120}$")
+
+
+class FactoryDenied(ValueError):
+    def __init__(self, message: str, code: str = "denied") -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class ExchangeRejected(ValueError):
+    def __init__(self, message: str, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+# --- agentlərarası məlumat ---
+
+@dataclass(frozen=True)
+class Exchange:
+    text: str
+    wrapped: str
+    suspicious: bool
+    flags: tuple[str, ...] = ()
+
+
+def _esc(t: str) -> str:
+    return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def validate_exchange(text: Any, *, source: str, max_chars: int = 8000) -> Exchange:
+    """Agentlər arası mətni yoxlayır: ölçü, sirr (rədd), idarəedici simvollar (təmizlənir), təlimat bənzərliyi (işarələnir). Nəticə həmişə
+    etibarsız məlumat blokuna bükülür."""
+    if not isinstance(text, str) or not text.strip():
+        raise ExchangeRejected("mətn boşdur", "empty")
+    if len(text) > max_chars:
+        raise ExchangeRejected(f"mətn çox uzundur (maks. {max_chars})", "too_large")
+    clean = "".join(c for c in text if c in "\n\t" or not unicodedata.category(c).startswith("C")).strip()
+    if detect_secrets(clean):
+        raise ExchangeRejected("mətn sirr bənzər məzmun ehtiva edir", "secret")
+    flags = tuple(detect_injection(clean))
+    suspicious = bool(flags)
+    wrapped = f'<untrusted_agent_output agent="{_esc(source)}" suspicious="{"true" if suspicious else "false"}">{_esc(clean)}</untrusted_agent_output>'
+    return Exchange(clean, wrapped, suspicious, flags)
+
+
+# --- siyasət və qeydlər ---
+
+@dataclass(frozen=True)
+class FactoryPolicy:
+    max_agents: int = 16
+    max_per_role: int = 3
+    max_queue: int = 50
+    global_budget_cap: float = 0.0      # 0 AZN prioritet: tavanı yalnız sahib qaldırır
+    autonomous_creation: bool = True    # NAYMERA-nın (sistem) MƏHDUD agent yaratmasına icazə
+    auto_stop_after_failures: int = 3
+    max_prompt_chars: int = 6000
+    max_handoff_depth: int = 5
+
+
+@dataclass(frozen=True)
+class AgentRecord:
+    agent_id: str
+    name: str
+    role_id: str
+    title: str
+    specialization: str
+    system_instruction: str
+    department: str
+    workspace: str
+    memory_policy: MemoryPolicy
+    status: str              # active | stopped | archived | deleted
+    stopped_by: str
+    restart_count: int
+    failures: int
+    created_by: str
+    created_at: float
+    updated_at: float
+    permissions: frozenset[str] = frozenset()   # Company-dən canlı
+    budget: float = 0.0
+
+
+@dataclass(frozen=True)
+class TaskRecord:
+    task_id: str
+    agent_id: str
+    title: str
+    prompt: str
+    kind: str
+    permission: str
+    cost: float
+    state: str               # queued | running | awaiting_approval | done | failed | cancelled
+    op_id: str
+    parent_task_id: str
+    created_by: str
+    attempts: int
+    approval_id: str
+    summary: str
+    error: str
+    suspicious: bool
+    created_at: float
+    updated_at: float
+    run_op: str = ""
+    prompt_sha: str = ""      # tapşırıq mətninin yaradılış anındakı SHA-256 (F-2: təsdiq/icra bağlılığı)
+
+
+@dataclass(frozen=True)
+class AgentReport:
+    task_id: str
+    agent_id: str
+    status: str
+    summary: str
+    artifacts: tuple[str, ...]
+    wrapped: str
+    suspicious: bool
+    cost: float
+    ts: float
+
+
+@dataclass(frozen=True)
+class PermissionRequest:
+    request_id: str
+    agent_id: str
+    permission: str
+    reason: str
+    state: str   # pending | approved | denied
+    ts: float
+
+
+@dataclass(frozen=True)
+class EventRecord:
+    ts: float
+    event: str
+    agent_id: str
+    detail: dict
+
+
+_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS factory_agents (agent_id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, role_id TEXT NOT NULL, title TEXT NOT NULL, "
+    "specialization TEXT NOT NULL, system_instruction TEXT NOT NULL, department TEXT NOT NULL, workspace TEXT NOT NULL, memory_policy_json TEXT NOT NULL, "
+    "status TEXT NOT NULL, stopped_by TEXT NOT NULL DEFAULT '', restart_count INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, "
+    "created_by TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS factory_tasks (task_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, title TEXT NOT NULL, prompt TEXT NOT NULL, kind TEXT NOT NULL, "
+    "permission TEXT NOT NULL, cost REAL NOT NULL, state TEXT NOT NULL, op_id TEXT UNIQUE NOT NULL, op_sha TEXT NOT NULL, parent_task_id TEXT NOT NULL DEFAULT '', "
+    "created_by TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, approval_id TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', "
+    "error TEXT NOT NULL DEFAULT '', suspicious INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, updated_at REAL NOT NULL, run_op TEXT NOT NULL DEFAULT '', prompt_sha TEXT NOT NULL DEFAULT '')",
+    "CREATE TABLE IF NOT EXISTS factory_reports (task_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, status TEXT NOT NULL, summary TEXT NOT NULL, "
+    "artifacts_json TEXT NOT NULL, wrapped TEXT NOT NULL, suspicious INTEGER NOT NULL, cost REAL NOT NULL, ts REAL NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS factory_requests (request_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, permission TEXT NOT NULL, reason TEXT NOT NULL, "
+    "state TEXT NOT NULL, ts REAL NOT NULL, resolved_by TEXT NOT NULL DEFAULT '', resolved_ts REAL NOT NULL DEFAULT 0)",
+    "CREATE TABLE IF NOT EXISTS factory_events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, event TEXT NOT NULL, agent_id TEXT NOT NULL, detail_json TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS factory_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS factory_used_credentials (nonce TEXT PRIMARY KEY, task_id TEXT NOT NULL, action TEXT NOT NULL, used_at REAL NOT NULL)",
+)
+_OPEN_TASK_STATES = ("queued", "running", "awaiting_approval")
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _finite(v: Any) -> bool:
+    return not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v) and v >= 0
+
+
+# --- sahib əməliyyatlarının DƏQİQ əhatəsi (B-3): əməliyyat adı + hədəf (subject) + parametrlərin SHA-256-sı ---
+
+def _sha_text(v: Any) -> str:
+    return hashlib.sha256(str(v).encode("utf-8")).hexdigest()
+
+
+def _s_spawn(role_id: Any, *, purpose: Any = "") -> tuple[str, dict]:
+    return str(role_id), {"purpose": str(purpose)}
+
+
+def _s_assign(agent_id: Any, title: Any, prompt: Any, *, kind: Any = None, permission: Any = "read_files", cost: Any = 0.0, op_id: Any = None,
+              parent_task_id: Any = "") -> tuple[str, dict]:
+    return str(agent_id), {"title": str(title), "prompt_sha256": _sha_text(prompt), "kind": kind, "permission": str(permission), "cost": cost, "op_id": op_id,
+                           "parent_task_id": str(parent_task_id)}
+
+
+def _s_cancel_task(task_id: Any) -> tuple[str, dict]:
+    return str(task_id), {}
+
+
+def _s_stop(agent_id: Any, reason: Any = "") -> tuple[str, dict]:
+    return str(agent_id), {"reason": str(reason)}
+
+
+def _s_agent_only(agent_id: Any) -> tuple[str, dict]:
+    return str(agent_id), {}
+
+
+def _s_create_agent(role_id: Any, *, permissions: Any = ("read_files",), sensitive_ok: Any = False, delegate_to: Any = (), budget: Any = 0.0,
+                    max_task_cost: Any = 0.0) -> tuple[str, dict]:
+    return str(role_id), {"permissions": sorted(str(x) for x in permissions), "sensitive_ok": bool(sensitive_ok), "delegate_to": sorted(str(x) for x in delegate_to),
+                          "budget": budget, "max_task_cost": max_task_cost}
+
+
+def _s_grant(agent_id: Any, *, permissions: Any, sensitive_ok: Any = False, delegate_to: Any = (), max_task_cost: Any = 0.0) -> tuple[str, dict]:
+    return str(agent_id), {"permissions": sorted(str(x) for x in permissions), "sensitive_ok": bool(sensitive_ok), "delegate_to": sorted(str(x) for x in delegate_to),
+                           "max_task_cost": max_task_cost}
+
+
+def _s_set_budget(agent_id: Any, budget: Any) -> tuple[str, dict]:
+    return str(agent_id), {"budget": budget}
+
+
+def _s_set_policy(**changes: Any) -> tuple[str, dict]:
+    return "policy", dict(changes)
+
+
+def _s_resolve_request(request_id: Any, approve: Any) -> tuple[str, dict]:
+    return str(request_id), {"approve": bool(approve)}
+
+
+_SCOPES: dict[str, Callable[..., tuple[str, dict]]] = {
+    "spawn": _s_spawn, "assign_task": _s_assign, "cancel_task": _s_cancel_task, "stop": _s_stop, "restart": _s_agent_only, "archive": _s_agent_only,
+    "create_agent": _s_create_agent, "grant": _s_grant, "set_budget": _s_set_budget, "set_policy": _s_set_policy, "resolve_request": _s_resolve_request,
+    "delete": _s_agent_only,
+}
+_SCOPE_ALIASES = {"assign": "assign_task"}
+
+
+def owner_scope(op: str, *args: Any, **kwargs: Any) -> tuple[str, str, str]:
+    """Sahibin step-up ilə təsdiqləyəcəyi DƏQİQ əhatə: `(əməliyyat, hədəf, parametr-hash)`. Əməliyyat metoduna verilən arqumentlərlə (`principal` OLMADAN) eyni funksiya
+    ilə hesablanır; fabrik icradan əvvəl etibarnamənin əhatəsini bununla müqayisə edir."""
+    op = _SCOPE_ALIASES.get(op, op)
+    fn = _SCOPES.get(op)
+    if fn is None:
+        raise ValueError(f"naməlum sahib əməliyyatı: {str(op)[:30]}")
+    try:
+        subject, params = fn(*args, **kwargs)
+    except Exception:  # noqa: BLE001 — yanlış arqumentlər: heç bir etibarnamənin əhatəsinə uyğun gəlməyən hash (əməliyyat özü sonra FactoryDenied ilə rədd edilir)
+        subject, params = "?", {"invalid_arguments": True}
+    try:
+        body = json.dumps({"op": op, "subject": subject, "params": params}, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False, default=str)
+    except (TypeError, ValueError):
+        body = repr((op, subject, sorted(params.items(), key=lambda kv: kv[0])))
+    return op, subject, hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+_UNKNOWN_EFFECT = _sha_text("company-effect:unknown")
+_INVALID_EFFECT = _sha_text("company-effect:invalid")
+
+
+class Authed(str):
+    """`who()` nəticəsi: `created_by` etiketi (str) + yoxlanmış etibarnamənin özü (`.principal`)."""
+    principal: Principal
+
+
+class _Core:
+    def __init__(self, company_view: CompanyView, db_path: str | Path, audit_path: str | Path, workspace_root: str | Path, owners: Iterable[str],
+                 allow_mock: bool, clock: Callable[[], float], policy: FactoryPolicy | None, verifier: Keyring | None = None) -> None:
+        # Nüvə (agentə baxan `AgentHandle` bunu işlədir) YALNIZ oxu üzünü (`CompanyView`) və yoxlama açarlarını (`Keyring`) saxlayır:
+        # `Company.admin`, imza verən obyekt və şəxsi açar burada YOXDUR.
+        self.company_view, self.clock, self.allow_mock = company_view, clock, bool(allow_mock)
+        self.verifier = verifier                         # None: etibarlı autentifikasiya yoxdur -> imtiyazlı əməliyyatlar BAĞLIDIR
+        self.owners = frozenset(owners)
+        if not self.owners or not all(isinstance(o, str) and o.strip() for o in self.owners):
+            raise ValueError("fabrik üçün boş olmayan sahib siyahısı tələb olunur")
+        self.audit_path = Path(audit_path)
+        self.root = Path(workspace_root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        if str(db_path) != ":memory:":
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self.lock = threading.RLock()
+        self.conn = connect(str(db_path), isolation_level=None, timeout=30)
+        self.conn.row_factory = sqlite3.Row
+        for stmt in _SCHEMA:
+            self.conn.execute(stmt)
+        self._migrate()
+        if policy is not None and self._setting("policy") is None:
+            self._save_policy(policy)
+
+    def _migrate(self) -> None:
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(factory_tasks)").fetchall()}
+        if "prompt_sha" not in cols:
+            self.conn.execute("ALTER TABLE factory_tasks ADD COLUMN prompt_sha TEXT NOT NULL DEFAULT ''")
+        for r in self.conn.execute("SELECT task_id, prompt FROM factory_tasks WHERE prompt_sha = ''").fetchall():
+            self.conn.execute("UPDATE factory_tasks SET prompt_sha = ? WHERE task_id = ?", (_sha(r["prompt"]), r["task_id"]))
+
+    # --- siyasət ---
+    def _setting(self, key: str) -> str | None:
+        row = self.conn.execute("SELECT value FROM factory_settings WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def _save_policy(self, p: FactoryPolicy) -> None:
+        self.conn.execute("INSERT INTO factory_settings (key, value) VALUES ('policy', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                          (json.dumps(p.__dict__),))
+
+    @property
+    def policy(self) -> FactoryPolicy:
+        raw = self._setting("policy")
+        return FactoryPolicy(**json.loads(raw)) if raw else FactoryPolicy()
+
+    # --- audit ---
+    def audit(self, event: str, agent_id: str = "", **fields: Any) -> None:
+        now = float(self.clock())
+        row = {"ts": datetime.fromtimestamp(now, timezone.utc).isoformat(), "event": event}
+        if agent_id:
+            row["agent_id"] = agent_id
+        row.update(fields)
+        self.audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.audit_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        with self.lock:
+            self.conn.execute("INSERT INTO factory_events (ts, event, agent_id, detail_json) VALUES (?, ?, ?, ?)",
+                              (now, event, agent_id, json.dumps(fields, ensure_ascii=False, default=str)))
+
+    def refuse(self, op: str, code: str, reason: str, principal: Principal | None = None, target: str = "") -> FactoryDenied:
+        """Rədd audit jurnalına yazılır (sirr və ya mətn YOX; `agent_id` açarı yalnız uğurlu əməliyyatlarda istifadə olunur)."""
+        fields: dict[str, Any] = {"op": op, "code": code, "reason": reason}
+        if target:
+            fields["target"] = target
+        if isinstance(principal, Principal):
+            fields.update(principal_id=principal.id, principal_kind=principal.kind)
+        self.audit("factory_denied", **fields)
+        return FactoryDenied(reason, code)
+
+    # --- icazə ---
+    def who(self, principal: Principal, op: str, *, owner_only: bool = False, scope: tuple[str, str] | None = None,
+            company: Callable[[], str] | None = None) -> Authed:
+        """Şəxsiyyət YALNIZ etibarlı açarla imzalanmış, vaxtı keçməmiş və ləğv olunmamış etibarnamə ilə qəbul olunur. Özü yaradılmış `Principal` rədd edilir; yoxlayıcı qurulmayıbsa imtiyazlı
+        əməliyyatlar bağlıdır. SAHİB etibarnaməsi yalnız bu DƏQİQ əməliyyata (ad + hədəf + parametr-hash) bağlı olmalıdır və BİR DƏFƏ istifadə olunur (B-3)."""
+        if not isinstance(principal, Principal):
+            raise self.refuse(op, "unauthorized", "principal tələb olunur")
+        if principal.kind == "agent":
+            raise self.refuse(op, "self_grant", "agent bu əməliyyatı edə bilməz", principal)
+        self._verify(principal, op, ("owner", "system", "mock_owner"))
+        if principal.kind == "mock" and not self.allow_mock:
+            raise self.refuse(op, "mock_rejected", "mock principal real sahib kimi qəbul olunmur", principal)
+        if principal.kind == "system":
+            if owner_only:
+                raise self.refuse(op, "owner_only", "bu əməliyyat yalnız sahibə məxsusdur", principal)
+            out = Authed(f"system:{principal.id}")
+            out.principal = principal
+            return out
+        if principal.id not in self.owners:
+            raise self.refuse(op, "unauthorized", "əməliyyatı edən sahib siyahısında deyil", principal)
+        sp = principal            # SignedPrincipal (yoxlama keçdi)
+        want = (op, scope[0], scope[1], company() if company is not None else "") if scope is not None else None
+        if want is None or (getattr(sp, "scope_op", ""), getattr(sp, "scope_subject", ""), getattr(sp, "scope_hash", ""), getattr(sp, "scope_company", "")) != want:
+            raise self.refuse(op, "scope_mismatch", "sahib etibarnaməsi bu dəqiq əməliyyata/hədəfə/parametrlərə bağlı deyil", principal)
+        with self.lock:
+            try:
+                self.conn.execute("INSERT INTO factory_used_credentials (nonce, task_id, action, used_at) VALUES (?, ?, ?, ?)",
+                                  (sp.nonce, scope[0][:80], op, float(self.clock())))
+            except sqlite3.IntegrityError:
+                raise self.refuse(op, "credential_replayed", "sahib etibarnaməsi artıq istifadə olunub (bir-dəfəlik)", principal) from None
+        out = Authed(f"owner:{principal.id}")
+        out.principal = principal
+        return out
+
+    def who_dispatcher(self, principal: Principal, op: str) -> str:
+        """Icra qatı (dispetçer) əməliyyatları üçün: yalnız imzalanmış `dispatcher` rolu."""
+        if not isinstance(principal, Principal):
+            raise self.refuse(op, "unauthorized", "dispetçer şəxsiyyəti tələb olunur")
+        self._verify(principal, op, ("dispatcher",))
+        return f"dispatcher:{principal.id}"
+
+    def _verify(self, principal: Principal, op: str, roles: tuple[str, ...]) -> None:
+        if self.verifier is None:
+            raise self.refuse(op, "owner_auth_unavailable", "etibarlı autentifikasiya qurulmayıb: imtiyazlı əməliyyat bağlıdır", principal)
+        try:
+            self.verifier.check_principal(principal, *roles)
+        except CredentialError as exc:
+            raise self.refuse(op, exc.code, str(exc), principal) from None
+
+    # --- tapşırığa və hərəkətə bağlı bir-dəfəlik dispetçer səlahiyyəti ---
+    def check_authorization(self, op: str, auth: Any, action: str, *, states: tuple[str, ...]) -> TaskRecord:
+        """İmza, açar/etibarnamə ləğvi, vaxt, hərəkət, tapşırıq/agent/icra op/əməliyyat id/cəhd bağlılığı və tapşırıq vəziyyəti yoxlanılır (istehlak ETMİR)."""
+        if self.verifier is None:
+            raise self.refuse(op, "owner_auth_unavailable", "etibarlı autentifikasiya qurulmayıb: icra qatı əməliyyatı bağlıdır")
+        if not isinstance(auth, DispatchAuthorization):
+            raise self.refuse(op, "dispatch_authorization_required", "tapşırığa bağlı dispetçer səlahiyyəti tələb olunur")
+        try:
+            self.verifier.check_authorization(auth, action)
+        except CredentialError as exc:
+            code = {"forged_principal": "dispatch_authorization_invalid"}.get(exc.code, exc.code)
+            raise self.refuse(op, code, str(exc), None, str(auth.task_id)[:40]) from None
+        t = self.get_task(auth.task_id)
+        if t is None or (t.task_id, t.agent_id, t.run_op, t.op_id, t.attempts) != (auth.task_id, auth.agent_id, auth.run_op, auth.op_id, auth.attempt):
+            raise self.refuse(op, "dispatch_authorization_invalid", "dispetçer səlahiyyəti bu tapşırığa/cəhdə bağlı deyil və ya köhnəlib", None, str(auth.task_id)[:40])
+        if t.state not in states:
+            raise self.refuse(op, "task_not_running", "tapşırıq bu hərəkət üçün uyğun vəziyyətdə deyil: səlahiyyət etibarsızdır", None, t.task_id)
+        return t
+
+    def consume_authorization(self, op: str, auth: DispatchAuthorization) -> None:
+        """Bir-dəfəlik istifadə: nonce bazada qeyd olunur; təkrar istifadə (replay) rədd edilir. Çağıran `self.lock` altındadır."""
+        try:
+            self.conn.execute("INSERT INTO factory_used_credentials (nonce, task_id, action, used_at) VALUES (?, ?, ?, ?)",
+                              (auth.nonce, auth.task_id, auth.action, float(self.clock())))
+        except sqlite3.IntegrityError:
+            raise self.refuse(op, "dispatch_authorization_replayed", "dispetçer səlahiyyəti artıq istifadə olunub", None, auth.task_id) from None
+
+    # --- oxuma ---
+    def row(self, agent_id: str) -> sqlite3.Row | None:
+        with self.lock:
+            return self.conn.execute("SELECT * FROM factory_agents WHERE agent_id = ?", (agent_id,)).fetchone()
+
+    def agent(self, row: sqlite3.Row) -> AgentRecord:
+        ca = self.company_view.get(row["name"])
+        mp = json.loads(row["memory_policy_json"])
+        return AgentRecord(row["agent_id"], row["name"], row["role_id"], row["title"], row["specialization"], row["system_instruction"],
+                           row["department"], row["workspace"], MemoryPolicy(tuple(mp["read_categories"]), tuple(mp["write_categories"]), bool(mp["share_with_cloud"])),
+                           row["status"], row["stopped_by"], row["restart_count"], row["failures"], row["created_by"], row["created_at"], row["updated_at"],
+                           ca.authority.permissions if (ca is not None and ca.status == "active") else frozenset(),
+                           float(ca.budget) if ca is not None else 0.0)
+
+    @staticmethod
+    def task(row: sqlite3.Row | None) -> TaskRecord | None:
+        if row is None:
+            return None
+        return TaskRecord(row["task_id"], row["agent_id"], row["title"], row["prompt"], row["kind"], row["permission"], float(row["cost"]), row["state"],
+                          row["op_id"], row["parent_task_id"], row["created_by"], row["attempts"], row["approval_id"], row["summary"], row["error"],
+                          bool(row["suspicious"]), row["created_at"], row["updated_at"], row["run_op"], row["prompt_sha"])
+
+    def get_task(self, task_id: str) -> TaskRecord | None:
+        with self.lock:
+            return self.task(self.conn.execute("SELECT * FROM factory_tasks WHERE task_id = ?", (task_id,)).fetchone())
+
+    def must_agent(self, agent_id: str, op: str, principal: Principal | None = None) -> AgentRecord:
+        row = self.row(agent_id) if isinstance(agent_id, str) else None
+        if row is None:
+            raise self.refuse(op, "unknown_agent", "agent tapılmadı", principal, str(agent_id)[:40])
+        return self.agent(row)
+
+    def committed(self, agent_id: str) -> float:
+        with self.lock:
+            r = self.conn.execute("SELECT COALESCE(SUM(cost), 0) AS c FROM factory_tasks WHERE agent_id = ? AND state IN ('queued','running','awaiting_approval','done')",
+                                  (agent_id,)).fetchone()
+        return float(r["c"])
+
+    def _set_status(self, agent_id: str, status: str, **extra: Any) -> None:
+        cols = ", ".join(f"{k} = ?" for k in extra)
+        self.conn.execute(f"UPDATE factory_agents SET status = ?, updated_at = ?{', ' + cols if cols else ''} WHERE agent_id = ?",
+                          (status, float(self.clock()), *extra.values(), agent_id))
+
+    def wrap_company(self, op: str, principal: Principal, fn: Callable[[], Any]) -> Any:
+        try:
+            return fn()
+        except CompanyDenied as exc:
+            raise self.refuse(op, exc.code, str(exc), principal) from None
+
+    # --- yaradılış ---
+    def check_caps(self, op: str, role_id: str, principal: Principal, system: bool) -> None:
+        p = self.policy
+        if system and not p.autonomous_creation:
+            raise self.refuse(op, "autonomy_disabled", "avtonom agent yaradılışı sahib tərəfindən söndürülüb", principal)
+        with self.lock:
+            total = self.conn.execute("SELECT COUNT(*) AS n FROM factory_agents WHERE status IN ('active','stopped')").fetchone()["n"]
+            per_role = self.conn.execute("SELECT COUNT(*) AS n FROM factory_agents WHERE status IN ('active','stopped') AND role_id = ?", (role_id,)).fetchone()["n"]
+        if total >= p.max_agents:
+            raise self.refuse(op, "agent_cap", f"agent sayı limiti: {p.max_agents}", principal)
+        if per_role >= p.max_per_role:
+            raise self.refuse(op, "role_cap", f"rol üzrə agent limiti: {p.max_per_role}", principal)
+
+    @staticmethod
+    def spec_for(role: RoleTemplate, name: str) -> AgentSpec:
+        return AgentSpec(name=name, purpose=role.specialization, tools=[], permissions=sorted(set(role.default_permissions) | set(role.requestable_permissions) | set(role.sensitive_requestable)),
+                         inputs=["sorgu"], outputs=["netice"], cost_limit=SPEC_COST_CEILING)
+
+    def company_effect(self, op: str, *args: Any, **kw: Any) -> str:
+        """Bu sahib əməliyyatının Company-də yaradacağı DƏQİQ təsirin hash-i (`company_scope`); təsir yoxdursa ''. Eyni funksiya `scope()` və `who()` tərəfindən istifadə olunur,
+        ona görə sahibin step-up ilə imzaladığı təsir Company-nin müstəqil yoxladığı təsirlə eynidir. Agent/rol tapılmırsa 'unknown' (heç bir etibarnamə uyğun gəlmir)."""
+        try:
+            op = _SCOPE_ALIASES.get(op, op)
+            if op == "spawn":
+                role = ROLE_CATALOG.get(args[0]) if isinstance(args[0], str) else None
+                return company_scope("register_baseline_agent", self.spec_for(role, "placeholder_agent"), role.department, role.title_az) if role else _UNKNOWN_EFFECT
+            if op == "create_agent":
+                role = ROLE_CATALOG.get(args[0]) if isinstance(args[0], str) else None
+                if role is None:
+                    return _UNKNOWN_EFFECT
+                authority = Authority(frozenset(kw.get("permissions", ("read_files",))), bool(kw.get("sensitive_ok", False)), frozenset(kw.get("delegate_to", ())),
+                                      float(kw.get("max_task_cost", 0.0)))
+                return company_scope("register_agent", self.spec_for(role, "placeholder_agent"), role.department, role.title_az, authority, float(kw.get("budget", 0.0)))
+            if op in ("stop", "restart", "archive", "grant", "set_budget"):
+                row = self.row(args[0]) if isinstance(args[0], str) else None
+                if row is None:
+                    return _UNKNOWN_EFFECT
+                name = row["name"]
+                if op == "stop":
+                    return company_scope("suspend", name)
+                if op == "restart":
+                    return company_scope("resume", name)
+                if op == "archive":
+                    return company_scope("retire", name)
+                if op == "set_budget":
+                    return company_scope("set_budget", name, float(args[1]))
+                ca = self.company_view.get(name)
+                return company_scope("set_authority", name, Authority(frozenset(kw["permissions"]), bool(kw.get("sensitive_ok", False)),
+                                                                     frozenset(kw.get("delegate_to", ())) | (ca.authority.delegate_to if ca else frozenset()),
+                                                                     float(kw.get("max_task_cost", 0.0))))
+            if op == "resolve_request":
+                if not args[1]:
+                    return ""                                                                  # rədd: Company dəyişikliyi yoxdur
+                with self.lock:
+                    r = self.conn.execute("SELECT * FROM factory_requests WHERE request_id = ?", (args[0],)).fetchone() if isinstance(args[0], str) else None
+                row = self.row(r["agent_id"]) if r is not None else None
+                if r is None or row is None:
+                    return _UNKNOWN_EFFECT
+                ca = self.company_view.get(row["name"])
+                perms = (ca.authority.permissions if ca else frozenset()) | {r["permission"]}
+                return company_scope("set_authority", row["name"], Authority(frozenset(perms), ca.authority.sensitive_ok if ca else False,
+                                                                            ca.authority.delegate_to if ca else frozenset(), ca.authority.max_task_cost if ca else 0.0))
+        except Exception:  # noqa: BLE001 — yanlış giriş: heç bir etibarnamə uyğun gəlməyən sabit dəyər (əməliyyatın özü sonra rədd edilir)
+            return _INVALID_EFFECT
+        return ""
+
+    def new_agent(self, role: RoleTemplate, principal: Principal, created_by: str, register: Callable[[AgentSpec], Any]) -> AgentRecord:
+        """`register(spec)` imtiyazlı (Company.admin) çağırışdır və yalnız `FactoryControl/FactoryAdmin` tərəfindən verilir; nüvə `Company.admin`-ə sahib deyil."""
+        agent_id = "agt_" + secrets.token_hex(4)
+        name = f"{role.role_id}_{secrets.token_hex(3)}"
+        spec = self.spec_for(role, name)
+        op = "create_agent"
+        self.wrap_company(op, principal, lambda: register(spec))
+        ws = (self.root / agent_id).resolve()
+        if self.root.resolve() not in ws.parents:
+            raise self.refuse(op, "workspace", "iş sahəsi yolu yanlışdır", principal)
+        ws.mkdir(parents=True, exist_ok=False)
+        now = float(self.clock())
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO factory_agents (agent_id, name, role_id, title, specialization, system_instruction, department, workspace, memory_policy_json, "
+                "status, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
+                (agent_id, name, role.role_id, role.title_az, role.specialization, role.system_instruction, role.department, str(ws),
+                 json.dumps(role.memory_policy.__dict__ | {"read_categories": list(role.memory_policy.read_categories),
+                                                           "write_categories": list(role.memory_policy.write_categories)}),
+                 created_by, now, now))
+        rec = self.agent(self.row(agent_id))  # type: ignore[arg-type]
+        self.audit("factory_agent_created", agent_id, name=name, role_id=role.role_id, permissions=sorted(rec.permissions), budget=rec.budget,
+                   created_by=created_by, workspace=str(ws))
+        return rec
+
+    def handoff_check(self, from_name: str, to_department: str, task: Task) -> Any:
+        return self.company_view.handoff(from_name, to_department, task)
+
+    # --- tapşırıq ---
+    def assign(self, op: str, agent: AgentRecord, title: Any, prompt: Any, *, kind: str | None, permission: str, cost: Any, op_id: str | None,
+               parent_task_id: str, created_by: str, principal: Principal | None, trusted_prompt: bool, suspicious: bool = False) -> TaskRecord:
+        pol = self.policy
+        if agent.status != "active":
+            raise self.refuse(op, "agent_not_active", "agent aktiv deyil", principal, agent.agent_id)
+        role = ROLE_CATALOG[agent.role_id]
+        kind = kind or role.task_kinds[0]
+        if kind not in role.task_kinds:
+            raise self.refuse(op, "kind_not_allowed", f"bu rol üçün tapşırıq növü icazəli deyil: {kind}", principal, agent.agent_id)
+        if permission not in KNOWN_PERMISSIONS:
+            raise self.refuse(op, "unknown_permission", "naməlum icazə", principal, agent.agent_id)
+        if permission not in agent.permissions:
+            raise self.refuse(op, "permission_not_held", "agentdə bu icazə yoxdur (genişləndirmə yalnız sahibdən)", principal, agent.agent_id)
+        if not isinstance(title, str) or not title.strip() or len(title) > 120:
+            raise self.refuse(op, "bad_title", "başlıq yanlışdır", principal, agent.agent_id)
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise self.refuse(op, "empty", "tapşırıq mətni boşdur", principal, agent.agent_id)
+        if len(prompt) > pol.max_prompt_chars:
+            raise self.refuse(op, "too_large", f"tapşırıq mətni çox uzundur (maks. {pol.max_prompt_chars})", principal, agent.agent_id)
+        if detect_secrets(prompt) or detect_secrets(title):
+            raise self.refuse(op, "secret", "tapşırıq sirr bənzər məzmun ehtiva edir", principal, agent.agent_id)
+        if not _finite(cost):
+            raise self.refuse(op, "bad_cost", "xərc sonlu və mənfi olmayan rəqəm olmalıdır", principal, agent.agent_id)
+        cost = float(cost)
+        if op_id is not None and (not isinstance(op_id, str) or not _OP_RE.match(op_id)):
+            raise self.refuse(op, "bad_op_id", "op_id yanlışdır", principal, agent.agent_id)
+        op_id = op_id or "op_" + secrets.token_hex(8)
+        sha = hashlib.sha256(json.dumps([agent.agent_id, kind, permission, title, prompt, cost], ensure_ascii=False).encode()).hexdigest()
+        with self.lock:
+            existing = self.conn.execute("SELECT task_id, op_sha FROM factory_tasks WHERE op_id = ?", (op_id,)).fetchone()
+        if existing is not None:
+            if existing["op_sha"] != sha:
+                raise self.refuse(op, "op_conflict", "op_id başqa məzmunla artıq istifadə olunub", principal, agent.agent_id)
+            return self.get_task(existing["task_id"])  # type: ignore[return-value]
+        ca = self.company_view.get(agent.name)
+        if ca is None or cost > ca.authority.max_task_cost:
+            raise self.refuse(op, "task_cost_limit", "tapşırıq xərci agentin maksimumunu aşır", principal, agent.agent_id)
+        if self.committed(agent.agent_id) + cost > agent.budget + 1e-9:
+            raise self.refuse(op, "budget_exceeded", "agentin büdcəsi çatmır", principal, agent.agent_id)
+        with self.lock:
+            open_n = self.conn.execute("SELECT COUNT(*) AS n FROM factory_tasks WHERE agent_id = ? AND state IN ('queued','running','awaiting_approval')",
+                                       (agent.agent_id,)).fetchone()["n"]
+            if open_n >= pol.max_queue:
+                raise self.refuse(op, "queue_full", "agentin növbəsi doludur", principal, agent.agent_id)
+            task_id = "tsk_" + secrets.token_hex(5)
+            now = float(self.clock())
+            self.conn.execute(
+                "INSERT INTO factory_tasks (task_id, agent_id, title, prompt, kind, permission, cost, state, op_id, op_sha, parent_task_id, created_by, "
+                "suspicious, created_at, updated_at, prompt_sha) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)",
+                (task_id, agent.agent_id, " ".join(title.split()), prompt, kind, permission, cost, op_id, sha, parent_task_id, created_by, int(suspicious), now, now,
+                 _sha(prompt)))
+        self.audit("factory_task_assigned", agent.agent_id, task_id=task_id, kind=kind, permission=permission, cost=cost, op_id=op_id,
+                   parent_task_id=parent_task_id, created_by=created_by, prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest())
+        return self.get_task(task_id)  # type: ignore[return-value]
+
+
+# --- fasadlar ---
+
+class FactoryView:
+    """Yalnız oxu."""
+
+    def __init__(self, core: _Core) -> None:
+        self._c = core
+
+    @property
+    def policy(self) -> FactoryPolicy:
+        return self._c.policy
+
+    def agent(self, agent_id: str) -> AgentRecord | None:
+        row = self._c.row(agent_id) if isinstance(agent_id, str) else None
+        return self._c.agent(row) if row is not None else None
+
+    def find(self, name: str) -> AgentRecord | None:
+        with self._c.lock:
+            row = self._c.conn.execute("SELECT * FROM factory_agents WHERE name = ?", (name,)).fetchone()
+        return self._c.agent(row) if row is not None else None
+
+    def agents(self, status: str | None = None, role_id: str | None = None) -> list[AgentRecord]:
+        sql, params = "SELECT * FROM factory_agents", []
+        where = ["status = ?" if status else "status != 'deleted'"]
+        if status:
+            params.append(status)
+        if role_id:
+            where.append("role_id = ?")
+            params.append(role_id)
+        with self._c.lock:
+            rows = self._c.conn.execute(f"{sql} WHERE {' AND '.join(where)} ORDER BY created_at, agent_id", params).fetchall()
+        return [self._c.agent(r) for r in rows]
+
+    def task(self, task_id: str) -> TaskRecord | None:
+        return self._c.get_task(task_id)
+
+    def tasks(self, agent_id: str | None = None, state: str | None = None) -> list[TaskRecord]:
+        sql, params, where = "SELECT * FROM factory_tasks", [], []
+        for col, val in (("agent_id", agent_id), ("state", state)):
+            if val:
+                where.append(f"{col} = ?")
+                params.append(val)
+        with self._c.lock:
+            rows = self._c.conn.execute(sql + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY created_at, task_id", params).fetchall()
+        return [self._c.task(r) for r in rows]  # type: ignore[misc]
+
+    def reports(self, agent_id: str | None = None, task_id: str | None = None) -> list[AgentReport]:
+        sql, params, where = "SELECT * FROM factory_reports", [], []
+        for col, val in (("agent_id", agent_id), ("task_id", task_id)):
+            if val:
+                where.append(f"{col} = ?")
+                params.append(val)
+        with self._c.lock:
+            rows = self._c.conn.execute(sql + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY ts, task_id", params).fetchall()
+        return [AgentReport(r["task_id"], r["agent_id"], r["status"], r["summary"], tuple(json.loads(r["artifacts_json"])), r["wrapped"],
+                            bool(r["suspicious"]), float(r["cost"]), r["ts"]) for r in rows]
+
+    def requests(self, state: str | None = None) -> list[PermissionRequest]:
+        with self._c.lock:
+            rows = self._c.conn.execute("SELECT * FROM factory_requests" + (" WHERE state = ?" if state else "") + " ORDER BY ts, request_id",
+                                        (state,) if state else ()).fetchall()
+        return [PermissionRequest(r["request_id"], r["agent_id"], r["permission"], r["reason"], r["state"], r["ts"]) for r in rows]
+
+    def events(self, agent_id: str | None = None, limit: int = 200) -> list[EventRecord]:
+        with self._c.lock:
+            rows = self._c.conn.execute("SELECT * FROM factory_events" + (" WHERE agent_id = ?" if agent_id else "") + " ORDER BY id LIMIT ?",
+                                        ((agent_id, limit) if agent_id else (limit,))).fetchall()
+        return [EventRecord(r["ts"], r["event"], r["agent_id"], json.loads(r["detail_json"])) for r in rows]
+
+    def remaining_budget(self, agent_id: str) -> float:
+        a = self.agent(agent_id)
+        return 0.0 if a is None else max(0.0, a.budget - self._c.committed(agent_id))
+
+
+class _Privileged:
+    """`Company.admin` YALNIZ burada saxlanır və yalnız `FactoryControl`/`FactoryAdmin` tərəfindən istifadə olunur. `_Core` və `AgentHandle` bu obyektə istinad etmir."""
+    __slots__ = ("admin",)
+
+    def __init__(self, admin: Any) -> None:
+        self.admin = admin
+
+
+class FactoryControl:
+    """NAYMERA (sistem) və sahib üçün: MƏHDUD agent yaratma, həyat dövrü, tapşırıq təyini. Səlahiyyət genişləndirmə imkanı YOXDUR."""
+
+    def __init__(self, core: _Core, priv: _Privileged) -> None:
+        self._c = core
+        self._p = priv
+
+    def scope(self, op: str, *args: Any, **kwargs: Any) -> tuple[str, str, str, str]:
+        """Sahibin step-up ilə imzalayacağı `(əməliyyat, hədəf, fabrik parametr-hash, şirkət təsiri hash-i)` (argumentlər əməliyyata verilənlərlə eynidir, `principal` olmadan).
+        Cihaz `scope_digest(fabrik hash, şirkət hash)` kompozitini imzalayır; fabrik fabrik hash-ini, Company şirkət hash-ini MÜSTƏQİL yoxlayır."""
+        name, subject, digest = owner_scope(op, *args, **kwargs)
+        return name, subject, digest, self._c.company_effect(name, *args, **kwargs)
+
+    def spawn(self, role_id: str, principal: Principal, *, purpose: str = "") -> AgentRecord:
+        c, op = self._c, "spawn"
+        created_by = c.who(principal, op, scope=owner_scope(op, role_id, purpose=purpose)[1:], company=lambda: c.company_effect(op, role_id))
+        principal = created_by.principal
+        role = ROLE_CATALOG.get(role_id) if isinstance(role_id, str) else None
+        if role is None:
+            raise c.refuse(op, "unknown_role", f"naməlum rol: {str(role_id)[:30]}", principal)
+        c.check_caps(op, role.role_id, principal, system=principal.kind == "system")
+        return c.new_agent(role, principal, created_by, lambda spec: self._p.admin.register_baseline_agent(spec, role.department, role.title_az, principal))
+
+    def assign(self, agent_id: str, title: str, prompt: str, principal: Principal, *, kind: str | None = None, permission: str = "read_files",
+               cost: float = 0.0, op_id: str | None = None, parent_task_id: str = "") -> TaskRecord:
+        c, op = self._c, "assign_task"
+        created_by = c.who(principal, op, scope=owner_scope(op, agent_id, title, prompt, kind=kind, permission=permission, cost=cost, op_id=op_id,
+                                                           parent_task_id=parent_task_id)[1:])
+        principal = created_by.principal
+        agent = c.must_agent(agent_id, op, principal)
+        return c.assign(op, agent, title, prompt, kind=kind, permission=permission, cost=cost, op_id=op_id, parent_task_id=parent_task_id,
+                        created_by=created_by, principal=principal, trusted_prompt=True)
+
+    def cancel_task(self, task_id: str, principal: Principal) -> TaskRecord:
+        c, op = self._c, "cancel_task"
+        principal = c.who(principal, op, scope=owner_scope(op, task_id)[1:]).principal
+        with c.lock:
+            cur = c.conn.execute("UPDATE factory_tasks SET state = 'cancelled', updated_at = ? WHERE task_id = ? AND state IN ('queued','awaiting_approval')",
+                                 (float(c.clock()), task_id))
+        t = c.get_task(task_id)
+        if t is None or cur.rowcount != 1:
+            raise c.refuse(op, "not_cancellable", "tapşırıq tapılmadı və ya ləğv oluna bilməz", principal, task_id)
+        c.audit("factory_task_cancelled", t.agent_id, task_id=task_id)
+        return t
+
+    def stop(self, agent_id: str, principal: Principal, reason: str = "") -> AgentRecord:
+        c, op = self._c, "stop"
+        principal = c.who(principal, op, scope=owner_scope(op, agent_id, reason)[1:], company=lambda: c.company_effect(op, agent_id)).principal
+        a = c.must_agent(agent_id, op, principal)
+        if a.status != "active":
+            raise c.refuse(op, f"agent_{a.status}", "yalnız aktiv agent dayandırıla bilər", principal, agent_id)
+        return self._halt(a, principal, reason)
+
+    def _halt(self, a: AgentRecord, principal: Principal, reason: str) -> AgentRecord:
+        """Dayandırma. `principal` ya yoxlanmış çağıran, ya da yalnız daxili təhlükəsiz dayandırmanın (ardıcıl uğursuzluq) şəxsiyyətidir."""
+        c, agent_id, op = self._c, a.agent_id, "stop"
+        c.wrap_company(op, principal, lambda: self._p.admin.suspend(a.name, principal))
+        with c.lock:
+            c._set_status(agent_id, "stopped", stopped_by="owner" if principal.kind in ("human", "mock") else "system")
+            c.conn.execute("UPDATE factory_tasks SET state = 'failed', error = 'agent dayandırıldı', updated_at = ? WHERE agent_id = ? AND state = 'running'",
+                           (float(c.clock()), agent_id))
+        c.audit("factory_agent_stopped", agent_id, by=f"{principal.kind}:{principal.id}", reason=" ".join(str(reason).split())[:120])
+        return c.agent(c.row(agent_id))  # type: ignore[arg-type]
+
+    def restart(self, agent_id: str, principal: Principal) -> AgentRecord:
+        c, op = self._c, "restart"
+        principal = c.who(principal, op, scope=owner_scope(op, agent_id)[1:], company=lambda: c.company_effect(op, agent_id)).principal
+        a = c.must_agent(agent_id, op, principal)
+        if a.status != "stopped":
+            raise c.refuse(op, f"agent_{a.status}" if a.status != "active" else "not_stopped", "yalnız dayandırılmış agent yenidən başladıla bilər", principal, agent_id)
+        if a.stopped_by == "owner" and principal.kind not in ("human", "mock"):
+            raise c.refuse(op, "owner_stopped", "sahibin dayandırdığı agenti yalnız sahib yenidən başlada bilər", principal, agent_id)
+        c.wrap_company(op, principal, lambda: self._p.admin.resume(a.name, principal))
+        with c.lock:
+            c._set_status(agent_id, "active", stopped_by="", restart_count=a.restart_count + 1, failures=0)
+        c.audit("factory_agent_restarted", agent_id, by=f"{principal.kind}:{principal.id}", restart_count=a.restart_count + 1)
+        return c.agent(c.row(agent_id))  # type: ignore[arg-type]
+
+    def archive(self, agent_id: str, principal: Principal) -> AgentRecord:
+        c, op = self._c, "archive"
+        principal = c.who(principal, op, scope=owner_scope(op, agent_id)[1:], company=lambda: c.company_effect(op, agent_id)).principal
+        a = c.must_agent(agent_id, op, principal)
+        if a.status not in ("active", "stopped"):
+            raise c.refuse(op, f"agent_{a.status}", "agent artıq arxivlənib və ya silinib", principal, agent_id)
+        c.wrap_company(op, principal, lambda: self._p.admin.retire(a.name, principal))
+        with c.lock:
+            c._set_status(agent_id, "archived")
+            c.conn.execute("UPDATE factory_tasks SET state = 'cancelled', error = 'agent arxivləndi', updated_at = ? WHERE agent_id = ? AND state IN ('queued','running','awaiting_approval')",
+                           (float(c.clock()), agent_id))
+        c.audit("factory_agent_archived", agent_id, by=f"{principal.kind}:{principal.id}")
+        return c.agent(c.row(agent_id))  # type: ignore[arg-type]
+
+
+class FactoryAdmin(FactoryControl):
+    """YALNIZ sahib/kanal adapterləri üçün. CEO-ya, agentlərə və LLM-ə verilmir."""
+
+    def create_agent(self, role_id: str, principal: Principal, *, permissions: Sequence[str] = ("read_files",), sensitive_ok: bool = False,
+                     delegate_to: Sequence[str] = (), budget: float = 0.0, max_task_cost: float = 0.0) -> AgentRecord:
+        c, op = self._c, "create_agent"
+        created_by = c.who(principal, op, owner_only=True, scope=owner_scope(op, role_id, permissions=permissions, sensitive_ok=sensitive_ok, delegate_to=delegate_to,
+                                                                            budget=budget, max_task_cost=max_task_cost)[1:],
+                         company=lambda: c.company_effect(op, role_id, permissions=permissions, sensitive_ok=sensitive_ok, delegate_to=delegate_to, budget=budget,
+                                                          max_task_cost=max_task_cost))
+        principal = created_by.principal
+        role = ROLE_CATALOG.get(role_id) if isinstance(role_id, str) else None
+        if role is None:
+            raise c.refuse(op, "unknown_role", f"naməlum rol: {str(role_id)[:30]}", principal)
+        perms = set(permissions)
+        if not perms <= KNOWN_PERMISSIONS:
+            raise c.refuse(op, "unknown_permission", "naməlum icazə", principal)
+        if not perms <= set(role.default_permissions) | set(role.requestable_permissions) | set(role.sensitive_requestable):
+            raise c.refuse(op, "permission_not_requestable", "icazə bu rol şablonunda verilə bilməz", principal)
+        if not set(delegate_to) <= set(DEPARTMENTS):
+            raise c.refuse(op, "unknown_department", "naməlum departament", principal)
+        if not _finite(budget) or budget > c.policy.global_budget_cap + 1e-9:
+            raise c.refuse(op, "budget_cap", "büdcə qlobal tavanı aşır (tavanı yalnız sahib qaldırır)", principal)
+        c.check_caps(op, role.role_id, principal, system=False)
+        authority = Authority(frozenset(perms), bool(sensitive_ok), frozenset(delegate_to), float(max_task_cost))
+        return c.new_agent(role, principal, created_by,
+                           lambda spec: self._p.admin.register_agent(spec, role.department, role.title_az, authority, float(budget), principal))
+
+    def grant(self, agent_id: str, principal: Principal, *, permissions: Sequence[str], sensitive_ok: bool = False,
+              delegate_to: Sequence[str] = (), max_task_cost: float = 0.0) -> AgentRecord:
+        c, op = self._c, "grant"
+        principal = c.who(principal, op, owner_only=True, scope=owner_scope(op, agent_id, permissions=permissions, sensitive_ok=sensitive_ok, delegate_to=delegate_to,
+                                                                           max_task_cost=max_task_cost)[1:],
+                              company=lambda: c.company_effect(op, agent_id, permissions=permissions, sensitive_ok=sensitive_ok, delegate_to=delegate_to,
+                                                               max_task_cost=max_task_cost)).principal
+        a = c.must_agent(agent_id, op, principal)
+        role = ROLE_CATALOG[a.role_id]
+        if not set(permissions) <= set(role.default_permissions) | set(role.requestable_permissions) | set(role.sensitive_requestable):
+            raise c.refuse(op, "permission_not_requestable", "icazə bu rol şablonunda verilə bilməz", principal, agent_id)
+        ca = c.company_view.get(a.name)
+        auth = Authority(frozenset(permissions), bool(sensitive_ok), frozenset(delegate_to) | (ca.authority.delegate_to if ca else frozenset()),
+                         float(max_task_cost))
+        c.wrap_company(op, principal, lambda: self._p.admin.set_authority(a.name, auth, principal))
+        c.audit("factory_authority_granted", agent_id, permissions=sorted(permissions), by=f"{principal.kind}:{principal.id}")
+        return c.agent(c.row(agent_id))  # type: ignore[arg-type]
+
+    def set_budget(self, agent_id: str, budget: float, principal: Principal) -> AgentRecord:
+        c, op = self._c, "set_budget"
+        principal = c.who(principal, op, owner_only=True, scope=owner_scope(op, agent_id, budget)[1:], company=lambda: c.company_effect(op, agent_id, budget)).principal
+        a = c.must_agent(agent_id, op, principal)
+        if not _finite(budget) or budget > c.policy.global_budget_cap + 1e-9:
+            raise c.refuse(op, "budget_cap", "büdcə qlobal tavanı aşır (tavanı yalnız sahib qaldırır)", principal, agent_id)
+        c.wrap_company(op, principal, lambda: self._p.admin.set_budget(a.name, float(budget), principal))
+        c.audit("factory_budget_changed", agent_id, before=a.budget, after=float(budget), by=f"{principal.kind}:{principal.id}")
+        return c.agent(c.row(agent_id))  # type: ignore[arg-type]
+
+    def set_policy(self, principal: Principal, **changes: Any) -> FactoryPolicy:
+        c, op = self._c, "set_policy"
+        principal = c.who(principal, op, owner_only=True, scope=owner_scope(op, **changes)[1:]).principal
+        cur = c.policy
+        for k, v in changes.items():
+            if k not in cur.__dict__:
+                raise c.refuse(op, "unknown_field", f"naməlum siyasət sahəsi: {k}", principal)
+            want = type(getattr(cur, k))
+            ok = isinstance(v, bool) if want is bool else (_finite(v) if want is float else (isinstance(v, int) and not isinstance(v, bool) and v >= 1))
+            if not ok:
+                raise c.refuse(op, "bad_value", f"{k} dəyəri yanlışdır", principal)
+            changes[k] = float(v) if want is float else v
+        new = replace(cur, **changes)
+        with c.lock:
+            c._save_policy(new)
+        c.audit("factory_policy_changed", changes=changes, by=f"{principal.kind}:{principal.id}")
+        return new
+
+    def resolve_request(self, request_id: str, approve: bool, principal: Principal) -> PermissionRequest:
+        c, op = self._c, "resolve_request"
+        principal = c.who(principal, op, owner_only=True, scope=owner_scope(op, request_id, approve)[1:], company=lambda: c.company_effect(op, request_id, approve)).principal
+        with c.lock:
+            row = c.conn.execute("SELECT * FROM factory_requests WHERE request_id = ?", (request_id,)).fetchone()
+            if row is None or row["state"] != "pending":
+                raise c.refuse(op, "not_pending", "sorğu tapılmadı və ya artıq həll olunub", principal, str(request_id)[:40])
+        a = c.must_agent(row["agent_id"], op, principal)
+        if approve:
+            ca = c.company_view.get(a.name)
+            perms = (ca.authority.permissions if ca else frozenset()) | {row["permission"]}
+            auth = Authority(frozenset(perms), ca.authority.sensitive_ok if ca else False, ca.authority.delegate_to if ca else frozenset(),
+                             ca.authority.max_task_cost if ca else 0.0)
+            c.wrap_company(op, principal, lambda: self._p.admin.set_authority(a.name, auth, principal))
+        with c.lock:
+            c.conn.execute("UPDATE factory_requests SET state = ?, resolved_by = ?, resolved_ts = ? WHERE request_id = ?",
+                           ("approved" if approve else "denied", f"{principal.kind}:{principal.id}", float(c.clock()), request_id))
+        c.audit("factory_permission_resolved", a.agent_id, request_id=request_id, permission=row["permission"], approved=bool(approve),
+                by=f"{principal.kind}:{principal.id}")
+        return next(r for r in FactoryView(c).requests() if r.request_id == request_id)
+
+    def delete(self, agent_id: str, principal: Principal) -> AgentRecord:
+        c, op = self._c, "delete"
+        principal = c.who(principal, op, owner_only=True, scope=owner_scope(op, agent_id)[1:]).principal
+        a = c.must_agent(agent_id, op, principal)
+        if a.status != "archived":
+            raise c.refuse(op, "not_archived", "yalnız arxivlənmiş agent silinə bilər", principal, agent_id)
+        with c.lock:
+            c._set_status(agent_id, "deleted")
+        c.audit("factory_agent_deleted", agent_id, by=f"{principal.kind}:{principal.id}")
+        return c.agent(c.row(agent_id))  # type: ignore[arg-type]
+
+
+def _request_permission(k: _Core, agent_id: str, permission: str, reason: str) -> PermissionRequest:
+    op = "request_permission"
+    a = k.must_agent(agent_id, op)
+    if permission not in KNOWN_PERMISSIONS:
+        raise k.refuse(op, "unknown_permission", "naməlum icazə", None, a.agent_id)
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 300:
+        raise k.refuse(op, "bad_reason", "səbəb boş və ya çox uzundur", None, a.agent_id)
+    if detect_secrets(reason):
+        raise k.refuse(op, "secret", "səbəb sirr bənzər məzmun ehtiva edir", None, a.agent_id)
+    with k.lock:
+        row = k.conn.execute("SELECT * FROM factory_requests WHERE agent_id = ? AND permission = ? AND state = 'pending'", (a.agent_id, permission)).fetchone()
+        if row is not None:
+            return PermissionRequest(row["request_id"], row["agent_id"], row["permission"], row["reason"], row["state"], row["ts"])
+        rid, now = "prq_" + secrets.token_hex(4), float(k.clock())
+        k.conn.execute("INSERT INTO factory_requests (request_id, agent_id, permission, reason, state, ts) VALUES (?, ?, ?, ?, 'pending', ?)",
+                       (rid, a.agent_id, permission, " ".join(reason.split()), now))
+    k.audit("factory_permission_requested", a.agent_id, request_id=rid, permission=permission)
+    return PermissionRequest(rid, a.agent_id, permission, reason, "pending", now)
+
+
+def _submit_result(k: _Core, agent_id: str, task_id: str, summary: str, artifacts: Sequence[str], cost: float,
+                   authorization: DispatchAuthorization | None) -> AgentReport:
+    """Nəticə YALNIZ `submit_result` hərəkətinə bağlı, bir-dəfəlik dispetçer səlahiyyəti ilə qəbul olunur."""
+    op = "submit_result"
+    t = k.get_task(task_id) if isinstance(task_id, str) else None
+    if t is None:
+        raise k.refuse(op, "unknown_task", "tapşırıq tapılmadı", None, str(task_id)[:40])
+    checked = k.check_authorization(op, authorization, "submit_result", states=("running",))
+    if checked.task_id != t.task_id:
+        raise k.refuse(op, "dispatch_authorization_invalid", "səlahiyyət başqa tapşırığa aiddir", None, t.task_id)
+    if t.agent_id != agent_id:
+        raise k.refuse(op, "not_your_task", "tapşırıq bu agentə təyin edilməyib", None, t.task_id)
+    a = k.must_agent(agent_id, op)
+    try:
+        ex = validate_exchange(summary, source=a.name)
+    except ExchangeRejected as exc:
+        raise k.refuse(op, exc.code, str(exc), None, t.task_id) from None
+    arts = tuple(artifacts)
+    if len(arts) > 10 or any(not isinstance(x, str) or not _ART_RE.match(x) or ".." in x or x.startswith("/") for x in arts):
+        raise k.refuse(op, "bad_artifact", "artefakt adları yanlışdır", None, t.task_id)
+    if not _finite(cost) or cost > t.cost + 1e-9:
+        raise k.refuse(op, "cost_over_estimate", "faktiki xərc təyin edilmiş xərci aşır", None, t.task_id)
+    now = float(k.clock())
+    with k.lock:
+        k.consume_authorization(op, authorization)   # type: ignore[arg-type]
+        cur = k.conn.execute("UPDATE factory_tasks SET state = 'done', summary = ?, suspicious = ?, updated_at = ?, cost = ? WHERE task_id = ? AND state = 'running'",
+                             (ex.text[:2000], int(ex.suspicious), now, float(cost), t.task_id))
+        if cur.rowcount != 1:
+            raise k.refuse(op, "task_not_running", "tapşırıq icra mərhələsində deyil", None, t.task_id)
+        k.conn.execute("INSERT INTO factory_reports (task_id, agent_id, status, summary, artifacts_json, wrapped, suspicious, cost, ts) VALUES (?, ?, 'done', ?, ?, ?, ?, ?, ?)",
+                       (t.task_id, a.agent_id, ex.text, json.dumps(list(arts)), ex.wrapped, int(ex.suspicious), float(cost), now))
+    k.audit("factory_task_done", a.agent_id, task_id=t.task_id, suspicious=ex.suspicious, cost=float(cost))
+    return AgentReport(t.task_id, a.agent_id, "done", ex.text, arts, ex.wrapped, ex.suspicious, float(cost), now)
+
+
+def _handoff(k: _Core, agent_id: str, to_agent_id: str, title: str, payload: dict, permission: str, cost: float, op_id: str | None,
+             parent_task_id: str) -> TaskRecord:
+    op = "handoff"
+    src = k.must_agent(agent_id, op)
+    if src.status != "active":
+        raise k.refuse(op, "agent_not_active", "agent aktiv deyil", None, src.agent_id)
+    dst = k.must_agent(to_agent_id, op)
+    if dst.agent_id == src.agent_id:
+        raise k.refuse(op, "self_handoff", "agent tapşırığı özünə ötürə bilməz", None, src.agent_id)
+    if dst.status != "active":
+        raise k.refuse(op, "target_not_active", "hədəf agent aktiv deyil", None, src.agent_id)
+    chain: list[TaskRecord] = []
+    if parent_task_id:
+        p = k.get_task(parent_task_id)
+        if p is None or p.agent_id != src.agent_id:
+            raise k.refuse(op, "parent_mismatch", "ana tapşırıq bu agentə aid deyil", None, src.agent_id)
+        cur: TaskRecord | None = p
+        while cur is not None and len(chain) < 64:
+            chain.append(cur)
+            cur = k.get_task(cur.parent_task_id) if cur.parent_task_id else None
+        if len(chain) > k.policy.max_handoff_depth:
+            raise k.refuse(op, "handoff_depth", "ötürmə zənciri çox dərindir", None, src.agent_id)
+        if dst.agent_id in {t.agent_id for t in chain}:
+            raise k.refuse(op, "handoff_cycle", "ötürmə dövrə yaradır", None, src.agent_id)
+    if not isinstance(payload, dict) or not payload or len(payload) > 20 or not all(isinstance(x, str) and 0 < len(x) <= 40 for x in payload):
+        raise k.refuse(op, "bad_payload", "payload yanlışdır", None, src.agent_id)
+    text = "\n".join(f"{key}: {value}" for key, value in payload.items())
+    try:
+        ex = validate_exchange(text, source=src.name, max_chars=k.policy.max_prompt_chars)
+    except ExchangeRejected as exc:
+        raise k.refuse(op, exc.code, str(exc), None, src.agent_id) from None
+    h = k.handoff_check(src.name, dst.department, Task(dst.department, {"sorgu": ex.text}, permission, cost if _finite(cost) else -1.0, title if isinstance(title, str) else ""))
+    if not h.ok:
+        raise k.refuse(op, h.code or "handoff_refused", h.reason, None, src.agent_id)
+    return k.assign(op, dst, title, ex.wrapped, kind=None, permission=permission, cost=cost, op_id=op_id, parent_task_id=parent_task_id,
+                    created_by=f"agent:{src.agent_id}", principal=None, trusted_prompt=False, suspicious=ex.suspicious)
+
+
+class AgentHandle:
+    """ETİBARLI TƏRƏF daxili portu (agent koduna VERİLMİR): yalnız `AgentGateway` (`runtime/agent_gateway.py`) onu çağırır. Bu SƏRHƏD DEYİL: bağlanışlar (`__closure__`) vasitəsilə
+    nüvəyə, DB bağlantılarına və reyestrə çatmaq mümkündür (audit B-1). Agent kodu yalnız AYRI proses + RPC ilə işləyir; bu sinif proses-daxili gizlətmə vəd etmir."""
+    __slots__ = ("agent_id", "info", "request_permission", "submit_result", "handoff")
+
+    def __init__(self, core: _Core, agent_id: str) -> None:
+        def info() -> AgentRecord:
+            return core.must_agent(agent_id, "info")
+
+        def request_permission(permission: str, reason: str) -> PermissionRequest:
+            return _request_permission(core, agent_id, permission, reason)
+
+        def submit_result(task_id: str, summary: str, artifacts: Sequence[str] = (), cost: float = 0.0, *,
+                          authorization: DispatchAuthorization | None = None) -> AgentReport:
+            return _submit_result(core, agent_id, task_id, summary, artifacts, cost, authorization)
+
+        def handoff(to_agent_id: str, title: str, payload: dict, *, permission: str = "read_files", cost: float = 0.0, op_id: str | None = None,
+                    parent_task_id: str = "") -> TaskRecord:
+            return _handoff(core, agent_id, to_agent_id, title, payload, permission, cost, op_id, parent_task_id)
+
+        for name, value in (("agent_id", agent_id), ("info", info), ("request_permission", request_permission), ("submit_result", submit_result),
+                            ("handoff", handoff)):
+            object.__setattr__(self, name, value)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("AgentHandle dəyişdirilə bilməz")
+
+
+@dataclass(frozen=True)
+class FailOutcome:
+    task: TaskRecord | None
+    transitioned: bool          # yalnız `running` -> failed/queued keçidi həqiqətən baş veribsə True
+    stop_recommended: bool      # ardıcıl uğursuzluq həddi aşılıb: dispetçer sistem şəxsiyyəti ilə agenti dayandırmalıdır
+
+
+class FactoryRuntime:
+    """Icra qatı üçün (dispetçer). Hər əməliyyat imzalanmış `dispatcher` şəxsiyyəti və ya HƏRƏKƏTƏ bağlı bir-dəfəlik `DispatchAuthorization` tələb edir.
+    Səlahiyyət VERMƏK imkanı yoxdur (imza obyekti burada yoxdur); agentlərə, CEO-ya və LLM-ə verilmir."""
+
+    def __init__(self, core: _Core) -> None:
+        self._c = core
+
+    def claim(self, task_id: str, principal: Principal) -> TaskRecord | None:
+        """Atomik: queued/awaiting_approval -> running. Agent aktiv deyilsə və ya tapşırıq başqa vəziyyətdədirsə None (təkrar icra yoxdur)."""
+        c = self._c
+        c.who_dispatcher(principal, "claim")
+        t = c.get_task(task_id)
+        if t is None:
+            return None
+        a = c.row(t.agent_id)
+        if a is None or a["status"] != "active":
+            return None
+        with c.lock:
+            cur = c.conn.execute("UPDATE factory_tasks SET state = 'running', attempts = attempts + 1, updated_at = ? WHERE task_id = ? AND state IN ('queued','awaiting_approval')",
+                                 (float(c.clock()), task_id))
+        if cur.rowcount != 1:
+            return None
+        with c.lock:  # icra zənciri üçün sabit op_id: təsdiqdən sonra davam edəndə eyni op_id istifadə olunur
+            c.conn.execute("UPDATE factory_tasks SET run_op = ? WHERE task_id = ? AND run_op = ''", (f"{t.op_id}:a{t.attempts + 1}", task_id))
+        c.audit("factory_task_started", t.agent_id, task_id=task_id, attempt=t.attempts + 1)
+        return c.get_task(task_id)
+
+    def await_approval(self, authorization: DispatchAuthorization, approval_id: str) -> bool:
+        """running -> awaiting_approval. Səlahiyyət istehlak olunur; keçid baş verməyibsə False."""
+        c = self._c
+        t = c.check_authorization("await_approval", authorization, "await_approval", states=("running",))
+        with c.lock:
+            c.consume_authorization("await_approval", authorization)
+            cur = c.conn.execute("UPDATE factory_tasks SET state = 'awaiting_approval', approval_id = ?, updated_at = ? WHERE task_id = ? AND state = 'running'",
+                                 (approval_id, float(c.clock()), t.task_id))
+        if cur.rowcount != 1:
+            return False
+        c.audit("factory_task_awaiting_approval", t.agent_id, task_id=t.task_id, approval_id=approval_id)
+        return True
+
+    def fail(self, authorization: DispatchAuthorization, reason: str, *, retry: bool = False) -> FailOutcome:
+        """running -> failed (retry=True: queued). Uğursuzluq sayğacı YALNIZ keçid həqiqətən baş verəndə artır; səlahiyyət bir dəfə istifadə olunur."""
+        c = self._c
+        t0 = c.check_authorization("fail", authorization, "fail", states=("running",))
+        with c.lock:
+            c.consume_authorization("fail", authorization)
+            cur = c.conn.execute("UPDATE factory_tasks SET state = ?, error = ?, updated_at = ?, run_op = '' WHERE task_id = ? AND state = 'running'",
+                                 ("queued" if retry else "failed", " ".join(str(reason).split())[:200], float(c.clock()), t0.task_id))
+        t = c.get_task(t0.task_id)
+        if cur.rowcount != 1:
+            return FailOutcome(t, False, False)
+        c.audit("factory_task_failed", t0.agent_id, task_id=t0.task_id, retry=retry, reason=" ".join(str(reason).split())[:120])
+        stop = False
+        if not retry:
+            with c.lock:
+                c.conn.execute("UPDATE factory_agents SET failures = failures + 1 WHERE agent_id = ?", (t0.agent_id,))
+            row = c.row(t0.agent_id)
+            stop = bool(row is not None and row["status"] == "active" and row["failures"] >= c.policy.auto_stop_after_failures)
+        return FailOutcome(t, True, stop)
+
+    def note_success(self, authorization: DispatchAuthorization) -> bool:
+        """Bir-dəfəlik: tamamlanmış (`done`) tapşırıq üçün ardıcıl uğursuzluq sayğacını sıfırlayır; təkrar istifadə (replay) rədd edilir."""
+        c = self._c
+        t = c.check_authorization("note_success", authorization, "note_success", states=("done",))
+        with c.lock:
+            c.consume_authorization("note_success", authorization)
+            c.conn.execute("UPDATE factory_agents SET failures = 0 WHERE agent_id = ?", (t.agent_id,))
+        return True
+
+
+class AgentFactory:
+    def __init__(self, company: Company, db_path: str | Path, audit_path: str | Path, workspace_root: str | Path, *, owners: Iterable[str],
+                 verifier: Keyring | None = None, allow_mock: bool = False, clock: Callable[[], float] = time.time,
+                 policy: FactoryPolicy | None = None) -> None:
+        """`verifier` (yalnız açıq açarlar) yoxdursa imtiyazlı əməliyyatlar (spawn/assign/admin/icra qatı) bağlıdır; yalnız oxu (`view`) işləyir.
+        Fabrik imza verə bilməz. `Company` obyektindən yalnız `view` nüvəyə, `admin` isə yalnız `control/admin` fasadlarına verilir; bu obyekt
+        etibarlı bootstrap-ın əlindədir və agentlərə verilmir."""
+        self._core = _Core(company.view, db_path, audit_path, workspace_root, owners, allow_mock, clock, policy, verifier)
+        priv = _Privileged(company.admin)
+        self.view = FactoryView(self._core)
+        self.control = FactoryControl(self._core, priv)
+        self.admin = FactoryAdmin(self._core, priv)
+        self.runtime = FactoryRuntime(self._core)
+
+    def handle(self, agent_id: str) -> AgentHandle:
+        """YALNIZ etibarlı server kodu üçün (məs. `AgentGateway`). Agent koduna, plaginə və ya LLM-ə heç vaxt verilmir; `FactoryStack` bunu paylamır."""
+        return AgentHandle(self._core, agent_id)

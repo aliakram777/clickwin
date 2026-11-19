@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Qaranlıq əsas tema: pəncərə fonu açılış zamanı ağ yanıb-sönmənin qarşısını alır. -->
+    <style name="Theme.Naymera" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:windowBackground">#0B1020</item>
+        <item name="android:statusBarColor">#0B1020</item>
+        <item name="android:navigationBarColor">#0B1020</item>
+    </style>
+</resources>
