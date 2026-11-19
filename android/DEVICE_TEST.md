@@ -13,3 +13,16 @@ Hazırlıq: `BUILD_STATUS.md`-dəki addımlarla debug APK yaradın və cihaza y�
 8. **Dil:** Ayarlar → az/en/ru/tr; bütün ekranlar dəyişməlidir.
 9. **Çıxış:** cihaz ayrılır, açar silinir; köhnə token serverdə 401 verir.
 10. **Barmaq izi əlavə edin** → köhnə açar etibarsız olmalıdır; yenidən cütləşdirin.
+
+
+## Mərhələ 18.12/18.13 (M2) — YALNIZ cihazda yoxlanan maddələr (bu mühitdə yoxlanılmayıb)
+- [ ] Debug APK qurulur, açılır, dil az (defolt); en/ru/tr seçimi işləyir; tünd tema, status/naviqasiya paneli kəsilmir.
+- [ ] Cütləşmə: Keystore açarı yaranır (StrongBox varsa onda), cihaz biometrik qeydiyyatsızdırsa aydın xəta.
+- [ ] Alt panel 5 tab + «Daha çox» menyusu (Yaddaş, Jurnal, Bildirişlər, Agentlər, Tarixçə, İmkanlar) hər biri açılır; geri düyməsi düzgün işləyir.
+- [ ] Panel: əlaqə/AI (simulyasiya etiketi), məqsəd sayı, gözləyən təsdiqlər, son fəaliyyət; STOP işləyir və imza tələb etmir; oflayn: köhnə məlumat + xəta + «Yenidən cəhd et».
+- [ ] Məqsəd yarat → qaralama; detalda «Başlat» → imza dialoqu dəqiq action/subject/decision/hash göstərir → «Biometrik ilə imzala» → server qəbul edir (status aktiv). Dayandır/Davam et/Tamamla/Ləğv et.
+- [ ] Biometrik ləğv/səhv barmaq izi → heç nə dəyişmir; yeni barmaq izi əlavə edildikdən sonra açar etibarsız olur (yenidən cütləşmə).
+- [ ] Təsdiqlər: «Təsdiqlə»/«Rədd et» yalnız dialoq açır; avtomatik təsdiq yoxdur; UNKNOWN addım həlli.
+- [ ] `FLAG_SECURE`: təsdiq/məqsəd detalı ekranında ekran görüntüsü qara; detaldan təsdiqlərə keçdikdən sonra da qara; digər ekranlarda normal.
+- [ ] Müxtəlif ekran ölçüləri/şrift ölçüsü/qaranlıq-işıq sistem rejimi; TalkBack ilə düymə etiketləri.
+- [ ] Şəbəkə kəsilmələri: təyyarə rejimi, server dayandırılması, yavaş şəbəkə.

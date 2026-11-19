@@ -1,5 +1,6 @@
 package az.naymera.app.security
 
+import az.naymera.app.data.ChallengeResponse
 import az.naymera.app.data.GoalChallenge
 import az.naymera.app.data.StepChallenge
 import java.security.MessageDigest
@@ -16,6 +17,7 @@ class SignableChallenge(
 object CoreChallenge {
     const val ACTION_GOAL = "core_goal"
     const val ACTION_STEP = "core_step"
+    const val ACTION_APPROVAL = "approval"
     val GOAL_TARGETS = setOf("active", "paused", "cancelled", "completed")
     val STEP_RESOLUTIONS = setOf("retry", "failed", "succeeded")
 
@@ -57,5 +59,16 @@ object CoreChallenge {
         need(ch.payloadHash == stepPayloadHash(expectedResolution, shownAttempt, shownState), "payload_hash")
         return SignableChallenge(ch.action, ch.subject, ch.payloadHash, ch.decision, ch.challengeId,
             Messages.challengeMessage(ch.challengeId, ch.nonce, ch.action, ch.subject, ch.payloadHash, ch.decision))
+    }
+
+    /** Təsdiq (mövcud `/v1/approvals`): imza YALNIZ ekranda göstərilən təsdiqin id-sinə və hash-inə, seçilmiş qərara bağlıdır; server fərqli təsdiq/hash qaytararsa imzalanmır. */
+    fun forApproval(ch: ChallengeResponse, approvalId: String, shownPayloadHash: String, decision: String): SignableChallenge {
+        need(decision == "approve" || decision == "deny", "decision")
+        need(ch.expiresIn > 0, "expires_in")
+        val a = ch.approval
+        need(a != null && a.id == approvalId, "subject")
+        need(a!!.payloadHash == shownPayloadHash, "payload_hash")
+        return SignableChallenge(ACTION_APPROVAL, approvalId, shownPayloadHash, decision, ch.challengeId,
+            Messages.challengeMessage(ch.challengeId, ch.nonce, ACTION_APPROVAL, approvalId, shownPayloadHash, decision))
     }
 }

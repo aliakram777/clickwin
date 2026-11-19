@@ -168,7 +168,10 @@ def test_session_storage_never_holds_server_or_third_party_keys():
 
 def test_ui_has_the_required_screens():
     nav = text(next(p for p in KT if p.name == "NaymeraApp.kt"))
-    for dest in ("home", "chat", "memory", "notifications", "agents", "history", "settings"):
+    domain_nav = text(SRC / "java" / "az" / "naymera" / "app" / "domain" / "Navigation.kt")
+    for dest in ("home", "assistant", "goals", "approvals", "memory", "journal", "settings"):          # M2: 7 əsas təyinat
+        assert f'"{dest}"' in domain_nav, dest
+    for dest in ("notifications", "agents", "history", "capabilities"):                                  # köməkçi ekranlar
         assert f'"{dest}"' in nav, dest
     chat = text(next(p for p in KT if p.name == "ChatScreen.kt"))
     assert "isMock" in chat and "OutlinedTextField" in chat or "TextField" in chat
@@ -266,7 +269,7 @@ def test_ui_has_no_hardcoded_user_visible_text():
         assert not re.search(r"[əıöüşçğƏİÖÜŞÇĞ]", "".join(re.findall(r'"[^"\n]*"', c))), p.name
         assert not re.search(r'\bText\(\s*"', c), p.name
         assert not re.search(r'(label|placeholder|contentDescription|title|subtitle)\s*=\s*(\{\s*Text\()?"', c), p.name
-        if p.name not in {"Theme.kt", "UiText.kt", "ChatViewModel.kt", "MainViewModel.kt"}:
+        if p.name not in {"Theme.kt", "UiText.kt", "ChatViewModel.kt", "MainViewModel.kt", "CoreViewModel.kt"}:
             assert "stringResource(" in c or "uiText(" in c, p.name
     # tərcümə açarları mövcuddur
     keys = set(strings_of("values"))
@@ -278,7 +281,7 @@ def test_interface_is_dark_by_default_and_has_the_required_sections():
     theme = text(next(p for p in KT if p.name == "Theme.kt"))
     assert "dark: Boolean = true" in theme
     nav = text(next(p for p in KT if p.name == "NaymeraApp.kt"))
-    for screen in ("HomeScreen", "ChatScreen", "MemoryScreen", "NotificationsScreen", "AgentsScreen", "HistoryScreen"):
+    for screen in ("DashboardScreen", "HomeScreen", "ChatScreen", "GoalsScreen", "GoalDetailScreen", "ApprovalScreen", "JournalScreen", "MemoryScreen", "NotificationsScreen", "AgentsScreen", "HistoryScreen"):
         assert screen in nav, screen
     assert "setApplicationLocales" in ALL_KT  # tətbiq daxili dil seçimi (az/en/ru/tr)
 
@@ -398,3 +401,26 @@ def test_state_and_notice_labels_are_honest_and_translated():
         assert f"notice_{code}" in az, code
     uitext = text(next(p for p in KT if p.name == "UiText.kt"))
     assert "notice_" in uitext
+
+
+def test_m2_ui_never_confirms_without_the_sign_dialog_and_never_touches_voice_or_secrets():
+    """M2: `confirm(` yalnız `SignDialog.onConfirm` daxilində çağırılır; imza dialoqu dəqiq dəyərləri göstərir; səs/sirr/şəbəkə kodu yoxdur."""
+    ui = SRC / "java" / "az" / "naymera" / "app" / "ui"
+    for name in ("ApprovalScreen.kt", "GoalsScreen.kt"):
+        c = text(ui / name)
+        calls = [m.start() for m in re.finditer(r"\.confirm\(", c)]
+        assert calls, name
+        for pos in calls:
+            assert "onConfirm" in c[max(0, pos - 80):pos], name                                          # yalnız dialoqun təsdiq düyməsindən
+        assert "SignDialog(" in c, name
+    widgets = text(ui / "CoreWidgets.kt")
+    for needle in ("c.action", "c.subject", "c.decision", "c.payloadHash", "FLAG_SECURE"):
+        assert needle in widgets, needle
+    for p in (ui / "CoreViewModel.kt", ui / "CoreWidgets.kt", ui / "ApprovalScreen.kt", ui / "GoalsScreen.kt", ui / "DashboardScreen.kt", ui / "JournalScreen.kt"):
+        c = text(p)
+        for banned in ("SpeechToText", "TextToSpeech", "SpeechRecognizer", 'method = "voice"', "api_key", "System.getenv"):
+            assert banned not in c, (p.name, banned)
+    domain = SRC / "java" / "az" / "naymera" / "app" / "domain"
+    for p in domain.glob("*.kt"):
+        assert "android." not in text(p) and "androidx." not in text(p), p.name                          # domen qatı Android-dan asılı deyil (JVM-də test olunur)
+    assert 'STEP_UP_METHOD = "biometric"' in text(domain / "ScreenModels.kt")

@@ -1,6 +1,6 @@
 # ANDROID_MVP_PLAN — Kotlin Android klienti (CORE API üzərində istifadə oluna bilən APK MVP)
 
-**Vəziyyət:** M1 (data qatı + CORE challenge yoxlaması + JVM kontrakt testləri) YAZILIB və JVM-də real Python backend ilə yoxlanıb; M2–M5 (UI, cihaz testi, APK) hələ yoxdur. APK bu mühitdə build EDİLMİR (Android SDK yoxdur, `dl.google.com` bloklu: bax `android/BUILD_STATUS.md`); «APK hazırdır» deyilməyəcək.
+**Vəziyyət:** M1 (data qatı + CORE challenge yoxlaması + JVM kontrakt testləri) YAZILIB və JVM-də real Python backend ilə yoxlanıb; M2 (Compose UI + MVVM, Stage 18.12) YAZILIB, lakin bu mühitdə KOMPİLYASİYA EDİLMƏYİB (Android SDK yoxdur); M3–M5 (cihaz biometrik testi, debug APK) hələ yoxdur. APK bu mühitdə build EDİLMİR (Android SDK yoxdur, `dl.google.com` bloklu: bax `android/BUILD_STATUS.md`); «APK hazırdır» deyilməyəcək.
 Bu sənəd mövcud kodu (`android/`, Stage 13–15) və yeni backend kontraktını (`api/core_api.py`, 18.11) əsas götürür.
 
 ## 1. Mövcud vəziyyət (qurulub)
@@ -54,8 +54,8 @@ Bu mühitdə build mümkün deyil. Seçimlər: **(a)** sahibin maşınında Andr
 | M | Nəticə | Qəbul (smoke) |
 |---|---|---|
 | M1 ✅ | Data qatı (`CoreModels.kt`, `ApiClient` CORE metodları, `security/CoreChallenge.kt`) + `jvm-contract` CORE testləri (`CoreChallengeTest`, `CoreContractTest`) | JVM testləri real backend ilə keçir (45/45, oflayn Gradle) |
-| M2 | Məqsədlər siyahısı/yaratma/detal (oxu + yaratma) | JVM + UI kompilyasiya (sahibin maşınında) |
-| M3 | Step-up ilə məqsəd keçidləri + addım təsdiqləri | cihazda biometrik imza → server qəbul edir |
+| M2 ✍️ | Panel, 7 təyinatlı naviqasiya (Əsas, AI Köməkçi, Məqsədlər, Təsdiqlər, Yaddaş, Jurnal, Ayarlar), məqsəd siyahısı/yaratma/detal/keçid, təsdiqlər, imza dialoqu, jurnal. `domain/` (Repository, `Load`/`ErrorKind` tipli vəziyyətlər, `GoalsModel`/`ApprovalsModel`/`DashboardModel`/`JournalModel`, `Destination`) JVM-də test olunur (59 JVM testi, real backend ilə); Compose ekranları YALNIZ mənbə səviyyəsində yoxlanıb (statik testlər) | UI kompilyasiyası sahibin maşınında (Android Studio) |
+| M3 | Cihazda biometrik imza (M2-də məntiq və imza dialoqu yazılıb) → server qəbul edir | cihaz testi |
 | M4 | UNKNOWN həlli, jurnal, status/STOP kartı | cihaz yoxlama siyahısı |
 | M5 | Debug APK build (sahibin maşını/CI təsdiqi ilə) | APK qurulur və quraşdırılır; cihaz testi `DEVICE_TEST.md` |
 M1 (data/security) və M2–M4 (UI) paralel yazıla bilər; serverdəki `serve_core_dev.py` və polling hadisələri asılı deyil.
@@ -63,3 +63,16 @@ M1 (data/security) və M2–M4 (UI) paralel yazıla bilər; serverdəki `serve_c
 ## 9. Məlum məhdudiyyətlər və risklər
 APK build/UI kompilyasiyası bu mühitdə yoxlanıla bilməz (yalnız Android-dan asılı olmayan qat JVM-də); push bildirişi yoxdur (polling); oflayn yazı yoxdur; Compose UI əl ilə cihaz testi tələb edir; AZ mətnləri mövcud `UiText` ilə uyğunlaşdırılmalıdır;
 `PlanStepSpec` arqument daşımır (məqsəd yaratma sadədir); CORE API autentifikasiyası mövcud cütləşmə/token sisteminə bağlıdır (ayrıca rol yoxdur: cütləşmiş cihaz = sahib cihazı).
+
+## 10. M2 (Stage 18.12) — nə yazılıb
+- **Arxitektura:** Compose ekranlar → `CoreViewModel` (yalnız həyat dövrü) → `domain/` modelləri (Android-dan asılı deyil) → `CoreRepository` → `ApiCoreRepository` → mövcud M1 `ApiClient`. Vəziyyətlər tiplidir: `Load.Idle/Loading/Content/Failed(kind, stale)`; xətada SON məzmun saxlanılır (oflayn: yalnız oxu, yazı/imza oflayn İCRA OLUNMUR).
+- **AI Köməkçi:** mövcud `ChatScreen`/`ChatViewModel` (AZ-ilk, tarixçə, yüklənmə/xəta/oflayn, mock/real etiketi, fallback qaydaları) təkrar istifadə olunub; qoşulmayan model işləyirmiş kimi göstərilmir.
+- **Təhlükəsizlik:** imza axını iki addımlıdır: «Təsdiqlə/Başlat/…» yalnız `SignDialog` açır (dəqiq action/subject/decision/payload_hash göstərilir); biometrik yalnız dialoqda «Biometrik ilə imzala» basılandan sonra; `CoreChallenge` (məqsəd, addım, təsdiq) klient tərəfində hash-i yenidən hesablayır, uyğunsuzluqda imzalamır; `FLAG_SECURE` təsdiq/detal ekranlarında; STOP imza tələb etmir və həmişə əlçatandır; server mətni etibarsız kimi qeyd olunur.
+- **Lokalizasiya:** az (defolt), en, ru, tr — 64 yeni açar hər dildə.
+- **Test:** `DomainModelsTest` (10), `NavigationTest` (3), `DomainBackendTest` (1, real backend), + mövcud JVM testləri = 59/59; `tests/test_android_project.py` (statik: hardcoded mətn yoxdur, `confirm` yalnız dialoqdan, domen Android-dan asılı deyil).
+
+## 11. Stage 18.13 — debug APK yoxlaması
+**APK generasiya edilmədi** (Google Maven və Android SDK bu mühitdə əlçatan deyil: `dl.google.com` bloklu). Əvəzində: statik Gradle/manifest/resurs testləri, **Compose mənbələrinin JVM-də Compose Multiplatform 1.7.0 ilə həqiqi KOMPİLYASİYASI** (`tools/compose_check.py`, 0 xəta; yalnız Android-a məxsus simvollar stub-dır) və 62 JVM testi. Dəqiq çatışmayanlar və təkrarlana bilən Android Studio addımları: `android/BUILD_STATUS.md`; cihaz yoxlama siyahısı: `android/DEVICE_TEST.md`. M3 bu yoxlama (real `assembleDebug`) bitməyincə başlanmır.
+
+## 12. Stage 18.14 — CI-da debug APK
+`.github/workflows/android-debug-apk.yml` (JDK 17, Gradle 8.9, SDK 34, `assembleDebug`, fokus testlər, yalnız artefakt, secret/imza/release yoxdur). Hələ icra olunmayıb: **real APK yoxdur**; M3 real build uğur qazanana qədər başlanmır. Ətraflı: `android/BUILD_STATUS.md`.

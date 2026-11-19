@@ -16,7 +16,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -93,7 +93,7 @@ fun ChatScreen(vm: ChatViewModel, modifier: Modifier = Modifier) {
             IconButton(
                 onClick = { vm.send(input); input = "" },
                 enabled = input.isNotBlank() && !state.sending,
-            ) { Icon(Icons.Filled.Send, contentDescription = stringResource(R.string.chat_send)) }
+            ) { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = stringResource(R.string.chat_send)) }
         }
     }
 }

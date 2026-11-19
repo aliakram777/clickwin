@@ -23,7 +23,7 @@ from kernel import Goal, GoalStatus, Origin  # noqa: E402
 from core import StepState  # noqa: E402
 
 PAIR_CODES = 24
-APPROVALS = 4
+APPROVALS = 6
 
 
 def _seed(dev) -> dict[str, str]:

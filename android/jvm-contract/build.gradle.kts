@@ -9,13 +9,22 @@ val syncSources by tasks.registering(Copy::class) {
         include("*.kt")
         exclude("SessionStore.kt")
     }
+    from("../app/src/main/java/az/naymera/app/domain") {
+        include("*.kt")
+    }
     from("../app/src/main/java/az/naymera/app/security/Messages.kt")
     from("../app/src/main/java/az/naymera/app/security/CoreChallenge.kt")
     into(layout.buildDirectory.dir("generated/app-sources"))
 }
 
+// JDK 17 (CI) VƏ yeni JDK-lar ilə işləsin deyə toolchain sabitlənmir: bayt-kod hədəfi 17.
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
 kotlin {
-    jvmToolchain(21)
+    compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
     sourceSets["main"].kotlin.srcDir(syncSources)
 }
 

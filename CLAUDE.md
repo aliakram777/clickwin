@@ -54,6 +54,7 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 ├── pytest.ini                 # testpaths, pythonpath
 ├── .gitignore                 # .env, .venv, logs/, *.db və s.
 ├── .github/workflows/ci.yml   # GitHub Actions: pytest
+├── .github/workflows/android-debug-apk.yml # Android DEBUG APK (JDK 17, Gradle 8.9, SDK 34, yalnız artefakt; secret/imza/release YOXDUR; hələ icra olunmayıb)
 ├── .claude/skills/
 │   ├── test-gate/SKILL.md     # "hazırdır" qapısı
 │   └── safety-layer/SKILL.md  # pul/hesab/nəşr/sirr təhlükəsizlik qatı
@@ -101,8 +102,9 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 ├── memory/                    # Mərhələ 18.3: store.py (SQLite+FTS5, 4 növ, aktor səlahiyyəti, etibar/mənşə, TTL), episodes.py (Kernel Loop observer); LLM yazmır
 ├── reasoning/                 # Mərhələ 18.4: planners.py (TemplatePlanner/ModelPlanner), critique.py, verify.py (CriteriaVerifier); icra YOXDUR
 ├── ANDROID_MVP_PLAN.md        # Kotlin Android MVP planı (CORE API üzərində; M1 data qatı hazırdır, UI/APK yoxdur)
+├── tools/compose_check.py     # Compose tip-yoxlaması (android/compose-check: həqiqi UI mənbələri JVM-də Compose Multiplatform ilə; APK DEYİL)
 ├── tools/serve_core_dev.py    # CORE inkişaf serveri: YALNIZ 127.0.0.1 (host seçimi yoxdur), CoreApiApp, demo L1 döngü; istehsal DEYİL
-├── android/…/data/CoreModels.kt, security/CoreChallenge.kt  # CORE DTO-ları + klient tərəfi step-up challenge yoxlaması (jvm-contract: CoreChallengeTest/CoreContractTest, core_vectors.json)
+├── android/…/data/CoreModels.kt, security/CoreChallenge.kt  # CORE DTO-ları + klient tərəfi step-up challenge yoxlaması; android/…/domain/ (Repository, tipli UI vəziyyətləri, Goals/Approvals/Dashboard/Journal modelləri, Destination — JVM-də test olunur) və ui/ (Compose ekranlar, CoreViewModel; kompilyasiya edilməyib) (jvm-contract: CoreChallengeTest/CoreContractTest, core_vectors.json)
 ├── OPS_API.md                 # Mərhələ 18.8/18.11: Operations (audit zənciri, scheduler, watchdog, backup, lease heartbeat) və Android CORE API
 ├── ops/                       # Mərhələ 18.8: audit.py (hash zənciri), scheduler.py, watchdog.py, backup.py; xarici şəbəkə/kod icrası YOXDUR
 ├── api/core_api.py            # Mərhələ 18.11: CoreApiApp (/v1/core/*, step-up); istehsala QOŞULMAYIB
@@ -119,7 +121,7 @@ CI: `.github/workflows/ci.yml` (hər push və PR-də `pytest`).
 ├── safety/tools.py            # Tool Runtime: allowlist, limitlər, SandboxAdapter interfeysi (real OS sandbox YOXDUR)
 ├── safety/workspace.py        # workspace fayl sərhədi (tətbiq səviyyəli) + fs.read/fs.write/fs.list
 ├── safety/ledger.py           # SQLite xərc kitabı: rezerv/təsdiq/azad, limitlər (data/ledger.db)
-└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration/workflow/retry/broker/approvals/approval_broker/workspace/tool_runtime/llm/llm_planner/memory/company/durable/research/proactive/mobile/api_http/api_auth/api_app/api_bootstrap/api_p256/android_integration/android_project/jvm_contract[opt-in]/hybrid_router/hybrid_api/local_models/voice_registry/providers/agent_factory/agent_runtime/factory_hardening/security_boundary/agent_isolation/agent_isolation_hardening/remaining_hardening/locked_connection/ledger_resolution/paid_llm_entry_points/shared_ledger/build_app_engine_ledger/overrun_breaker/unicode_engine_ceiling/local_runtime_bypass/dns_pinning/api_object_graph/isolation_limits/ci_privileged_policy/team/builders/company_suspend/orchestrator_target/kernel_contracts/core_store/core_loop/core_brokered/core_audit/memory_engine/reasoning/core_handlers/ops/core_api/serve_core_dev/core_signing_flow)
+└── tests/                     # pytest testləri (spec/factory/verify/gate/registry/orchestrator/ceo/ledger/cost_integration/ledger_budget/budget_integration/workflow/retry/broker/approvals/approval_broker/workspace/tool_runtime/llm/llm_planner/memory/company/durable/research/proactive/mobile/api_http/api_auth/api_app/api_bootstrap/api_p256/android_integration/android_project/jvm_contract[opt-in]/hybrid_router/hybrid_api/local_models/voice_registry/providers/agent_factory/agent_runtime/factory_hardening/security_boundary/agent_isolation/agent_isolation_hardening/remaining_hardening/locked_connection/ledger_resolution/paid_llm_entry_points/shared_ledger/build_app_engine_ledger/overrun_breaker/unicode_engine_ceiling/local_runtime_bypass/dns_pinning/api_object_graph/isolation_limits/ci_privileged_policy/team/builders/company_suspend/orchestrator_target/kernel_contracts/core_store/core_loop/core_brokered/core_audit/memory_engine/reasoning/core_handlers/ops/core_api/serve_core_dev/core_signing_flow/android_build_config/android_workflow)
 ```
 
 Yeni kod əlavə olunanda bu xəritəni yenilə.

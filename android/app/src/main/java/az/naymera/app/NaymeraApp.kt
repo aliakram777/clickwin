@@ -9,7 +9,29 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Chat
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.IconButton
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.fragment.app.FragmentActivity
+import az.naymera.app.domain.ApiCoreRepository
+import az.naymera.app.domain.Destination
+import az.naymera.app.ui.BiometricSigner
+import az.naymera.app.ui.CoreViewModel
+import az.naymera.app.ui.DashboardScreen
+import az.naymera.app.ui.GoalDetailScreen
+import az.naymera.app.ui.GoalsScreen
+import az.naymera.app.ui.JournalScreen
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Memory
@@ -62,8 +84,6 @@ import az.naymera.app.ui.uiText
 import az.naymera.app.voice.MockSpeech
 import kotlinx.coroutines.launch
 
-private data class Tab(val route: String, val label: Int, val icon: androidx.compose.ui.graphics.vector.ImageVector)
-
 @Composable
 fun NaymeraApp(store: SessionStore, api: ApiClient) {
     NaymeraTheme {
@@ -85,6 +105,26 @@ fun NaymeraApp(store: SessionStore, api: ApiClient) {
     }
 }
 
+private fun Destination.icon(): ImageVector = when (this) {
+    Destination.Home -> Icons.Filled.Home
+    Destination.Assistant -> Icons.AutoMirrored.Filled.Chat
+    Destination.Goals -> Icons.Filled.Flag
+    Destination.Approvals -> Icons.Filled.VerifiedUser
+    Destination.Memory -> Icons.Filled.Memory
+    Destination.Journal -> Icons.Filled.History
+    Destination.Settings -> Icons.Filled.Settings
+}
+
+private fun Destination.label(): Int = when (this) {
+    Destination.Home -> R.string.tab_home
+    Destination.Assistant -> R.string.nav_assistant
+    Destination.Goals -> R.string.nav_goals
+    Destination.Approvals -> R.string.nav_approvals
+    Destination.Memory -> R.string.tab_memory
+    Destination.Journal -> R.string.nav_journal
+    Destination.Settings -> R.string.tab_settings
+}
+
 @Composable
 private fun Main(store: SessionStore, api: ApiClient, onLoggedOut: () -> Unit) {
     val nav = rememberNavController()
@@ -93,49 +133,69 @@ private fun Main(store: SessionStore, api: ApiClient, onLoggedOut: () -> Unit) {
     val onDevice = remember { NotConfiguredLocal } // cihazdakı Local AI: model qurulmayıb (NOT CONFIGURED)
     val mainVm: MainViewModel = viewModel(factory = viewModelFactory { initializer { MainViewModel(api, sync) } })
     val chatVm: ChatViewModel = viewModel(factory = viewModelFactory { initializer { ChatViewModel(api, speech, onDevice) { mainVm.currentMode } } })
-    val tabs = listOf(
-        Tab("home", R.string.tab_home, Icons.Filled.Home),
-        Tab("chat", R.string.tab_chat, Icons.Filled.Chat),
-        Tab("memory", R.string.tab_memory, Icons.Filled.Memory),
-        Tab("notifications", R.string.tab_notifications, Icons.Filled.Notifications),
-        Tab("agents", R.string.tab_agents, Icons.Filled.Group),
-    )
-    val current = nav.currentBackStackEntryAsState().value?.destination?.route
-    Scaffold(bottomBar = {
-        NavigationBar {
-            tabs.forEach { t ->
-                NavigationBarItem(
-                    selected = current == t.route,
-                    onClick = { nav.navigate(t.route) { launchSingleTop = true } },
-                    icon = { Icon(t.icon, contentDescription = stringResource(t.label)) },
-                    label = { Text(stringResource(t.label)) },
-                )
-            }
-        }
-    }) { pad ->
-        NavHost(nav, startDestination = "home", modifier = Modifier.padding(pad)) {
-            composable("home") {
-                Column {
-                    HomeScreen(mainVm, onDevice, Modifier.weight(1f))
-                    Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { nav.navigate("history") }) { Text(stringResource(R.string.tab_history)) }
-                        TextButton(onClick = { nav.navigate("settings") }) { Text(stringResource(R.string.tab_settings)) }
+    val coreVm: CoreViewModel = viewModel(factory = viewModelFactory { initializer { CoreViewModel(ApiCoreRepository(api)) } })
+    val activity = LocalContext.current as FragmentActivity
+    val stepUpTitle = stringResource(R.string.stepup_title)
+    val stepUpCancel = stringResource(R.string.stepup_cancel)
+    val signer = remember(activity, stepUpTitle, stepUpCancel) { BiometricSigner(activity, stepUpTitle, stepUpCancel) }
+    LaunchedEffect(Unit) { mainVm.startSync() }
+    val route = nav.currentBackStackEntryAsState().value?.destination?.route
+    val selected = Destination.selectedTab(route)
+    var menu by remember { mutableStateOf(false) }
+
+    fun go(r: String) = nav.navigate(r) { launchSingleTop = true }
+
+    Scaffold(
+        topBar = {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+                Box {
+                    IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.nav_more)) }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        (Destination.overflow.map { it.route to it.label() } + listOf(
+                            "notifications" to R.string.tab_notifications, "agents" to R.string.tab_agents, "history" to R.string.tab_history, "capabilities" to R.string.nav_capabilities,
+                        )).forEach { (r, l) -> DropdownMenuItem(text = { Text(stringResource(l)) }, onClick = { menu = false; go(r) }) }
                     }
                 }
             }
-            composable("chat") { ChatScreen(chatVm) }
-            composable("memory") { MemoryScreen(mainVm) }
-            composable("notifications") {
-                Column {
-                    NotificationsScreen(mainVm, Modifier.weight(1f))
-                    ApprovalScreen(api, Modifier.weight(1f))
+        },
+        bottomBar = {
+            NavigationBar {
+                Destination.bottomBar.forEach { d ->
+                    NavigationBarItem(
+                        selected = selected == d,
+                        onClick = { go(d.route) },
+                        icon = { Icon(d.icon(), contentDescription = stringResource(d.label())) },
+                        label = { Text(stringResource(d.label()), maxLines = 1) },
+                    )
                 }
             }
-            composable("agents") { AgentsScreen(mainVm) }
-            composable("history") {
-                HistoryScreen(api, onOpen = { id -> chatVm.open(id); nav.navigate("chat") })
+        },
+    ) { pad ->
+        NavHost(nav, startDestination = Destination.START, modifier = Modifier.padding(pad)) {
+            composable(Destination.Home.route) {
+                DashboardScreen(coreVm, mainVm, onGoals = { go(Destination.Goals.route) }, onApprovals = { go(Destination.Approvals.route) },
+                    onJournal = { go(Destination.Journal.route) }, onCapabilities = { go("capabilities") })
             }
-            composable("settings") { SettingsScreen(store, api, onLoggedOut) }
+            composable(Destination.Assistant.route) {
+                Column {
+                    TextButton(onClick = { go("history") }, modifier = Modifier.padding(horizontal = 8.dp)) { Text(stringResource(R.string.tab_history)) }
+                    ChatScreen(chatVm, Modifier.weight(1f))
+                }
+            }
+            composable(Destination.Goals.route) { GoalsScreen(coreVm, onOpen = { id -> go(Destination.goalDetail(id)) }) }
+            composable(Destination.GOAL_DETAIL) { entry ->
+                val id = entry.arguments?.getString("id").orEmpty()
+                if (Regex("[A-Za-z0-9_.:\\-]{1,64}").matches(id)) GoalDetailScreen(coreVm, id, signer)
+            }
+            composable(Destination.Approvals.route) { ApprovalScreen(coreVm, signer) }
+            composable(Destination.Memory.route) { MemoryScreen(mainVm) }
+            composable(Destination.Journal.route) { JournalScreen(coreVm) }
+            composable(Destination.Settings.route) { SettingsScreen(store, api, onLoggedOut) }
+            composable("notifications") { NotificationsScreen(mainVm) }
+            composable("agents") { AgentsScreen(mainVm) }
+            composable("capabilities") { HomeScreen(mainVm, onDevice) }
+            composable("history") { HistoryScreen(api, onOpen = { id -> chatVm.open(id); go(Destination.Assistant.route) }) }
         }
     }
 }
